@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Auction House</title>
+	<meta name="description" content="Auction house prices, history and statistics from Auctionator scans.">
+	<link rel="icon" href="icons/inv_misc_coin_01.jpg">
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Marcellus+SC&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="style.css">
+</head>
+<body>
+	<header class="topbar">
+		<a class="brand" href="#/">
+			<img src="icons/inv_misc_coin_01.jpg" alt="" width="36" height="36">
+			<span id="site-title">Auction House</span>
+		</a>
+		<div class="quick">
+			<input id="quick" type="search" placeholder="Search items..." autocomplete="off" spellcheck="false">
+			<div id="quick-results" class="menu" hidden></div>
+		</div>
+		<label class="realm">Realm
+			<select id="realm"></select>
+		</label>
+		<div id="scan-info" class="scan-info"></div>
+	</header>
+
+	<main class="frame">
+		<nav class="tabs" id="tabs">
+			<a data-view="browse">Browse</a>
+			<a data-view="market">Market</a>
+			<a data-view="deals">Deals</a>
+			<a data-view="disenchant">Disenchant</a>
+			<a data-view="flips">Vendor Flips</a>
+			<a data-view="posts">My Auctions</a>
+		</nav>
+		<div id="view" class="view"><div class="loading">Loading the auction house...</div></div>
+	</main>
+
+	<footer class="foot">
+		Prices from <b>Auctionator</b> scans. Item data and icons from <a href="https://www.wowhead.com/forever" target="_blank" rel="noopener">Wowhead</a>.
+		World of Warcraft is a trademark of Blizzard Entertainment. Fan made, not affiliated.
+	</footer>
+
+	<div id="tip" class="tooltip" hidden></div>
+	<script src="app.js"></script>
+</body>
+</html>
