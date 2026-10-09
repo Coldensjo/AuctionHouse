@@ -14,8 +14,11 @@ STATE = os.path.join(ROOT, "state")
 BRANCH = "gh-pages"
 BACKUP = "_state" # inside the published site
 
+# On Windows every git call would otherwise open (and flash) its own console window when the sync runs hidden.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 def git(*args, cwd=ROOT, check=True, binary=False):
-	r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=not binary)
+	r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=not binary, stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
 	if check and r.returncode:
 		err = r.stderr.decode(errors="replace") if binary else r.stderr
 		raise RuntimeError(f"git {' '.join(args)} failed: {err.strip()}")
