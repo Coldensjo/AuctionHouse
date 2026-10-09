@@ -331,8 +331,9 @@ def export(cfg, fetch=True):
 		if not m or m.get("missing"):
 			rows[i] = [f"Item #{i}", 1, "inv_misc_questionmark", -1, -1, 0, 0, 0, 0, vendor.get(str(i), 0)]
 			continue
-		classes[m["c"]] = m["cn"]
-		subclasses[f"{m['c']}:{m['s']}"] = m["sn"]
+		# names from the current tables, so fixes there apply without fetching items again
+		classes[m["c"]] = wowhead.CLASSES.get(m["c"]) or m["cn"]
+		subclasses[f"{m['c']}:{m['s']}"] = wowhead.SUBCLASSES.get(m["c"], {}).get(m["s"]) or m["sn"]
 		if m["slot"]:
 			slots[m["slot"]] = m["slotn"]
 		rows[i] = [m["name"], m["q"], m["icon"], m["c"], m["s"], m["slot"], m["ilvl"], m["req"], m["sell"], m["buy"] or vendor.get(str(i), 0)]
