@@ -89,9 +89,10 @@ function money(c, cls = "") {
 	}
 	let h = "";
 	if (g) h += `${g.toLocaleString()}<i class="g"></i>`;
-	// From 1,000g copper is left out and from 10,000g silver too: small change at that size, and it keeps columns narrow.
-	if (g < 10000 && (s || (g && k && g < 1000))) h += `${g ? String(s).padStart(2, "0") : s}<i class="s"></i>`;
-	if (g < 1000 && (k || !h)) h += `${(g || s) ? String(k).padStart(2, "0") : k}<i class="c"></i>`;
+	// Lower coins are always shown once a higher one is (5g 00s 00c), except that from 1,000g copper is
+	// left out and from 10,000g silver too: small change at that size, and it keeps columns narrow.
+	if (g < 10000 && (g || s)) h += `${g ? String(s).padStart(2, "0") : s}<i class="s"></i>`;
+	if (g < 1000) h += `${(g || s) ? String(k).padStart(2, "0") : k}<i class="c"></i>`;
 	return `<span class="money ${neg ? "neg" : ""} ${cls}">${neg ? "-" : ""}${h}</span>`;
 }
 function moneyText(c) {
