@@ -1,4 +1,4 @@
-## Interface: 11508, 11509, 20506, 38000, 50504
+## Interface: 11508, 11509, 16001, 20506, 38000, 50504, 120100
 ## Title: Auctionhouse Sync
 ## Notes: Records every Auctionator scan for the auction house website, and offers a reload after a full scan so it can be uploaded.
 ## Author: Siz
