@@ -28,7 +28,6 @@ WoW only writes saved variables on `/reload`, logout or exit, so do one of those
 - **Vendor Flips**: items listed below vendor price, and vendor items listed above vendor price.
 - **Vendor Recipes**: recipes a vendor sells that are also on the auction house, vendor price vs auction price,
   with the vendors' names, zones, faction and limited stock. Filter by faction and profession.
-- **My Auctions**: your Auctionator posting history compared with current prices.
 
 Hover any item for its in-game tooltip with auction, average, disenchant and vendor prices. Press `/` to search.
 

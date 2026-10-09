@@ -145,7 +145,7 @@ function href(view, arg, params) {
 	return `#/${S.realm.slug}/${view}${arg != null ? "/" + encodeURIComponent(arg) : ""}${qs}`;
 }
 
-const VIEWS = { browse, item: itemView, market, deals, disenchant, flips, recipes, posts };
+const VIEWS = { browse, item: itemView, market, deals, disenchant, flips, recipes };
 let routeToken = 0;
 async function route() {
 	const { realm, view, arg, params } = parseHash();
@@ -758,24 +758,6 @@ async function recipes(el, params, arg, token) {
 
 function loadPosting() {
 	return load("posting", async () => (S.posting = await getJSON("posting.json")));
-}
-async function posts(el, params, arg, token) {
-	await loadPosting();
-	if (token !== routeToken) return;
-	const D = S.data[S.realm.slug];
-	const rows = [];
-	for (const [id, ps] of Object.entries(S.posting)) {
-		const m = D.byId.get(+id) || { id: +id, ...itemMeta(+id) };
-		for (const [t, price, qty] of ps) rows.push({ ...m, t, price, qty });
-	}
-	const total = rows.reduce((s, r) => s + r.price * r.qty, 0);
-	COLS.posted = { label: "Posted", sort: r => r.t, fmt: r => new Date(r.t * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) };
-	COLS.price = { label: "Each", sort: r => r.price, cls: "r", fmt: r => money(r.price) };
-	COLS.qty = { label: "Qty", sort: r => r.qty, cls: "r", fmt: r => r.qty };
-	COLS.total = { label: "Total", sort: r => r.price * r.qty, cls: "r", fmt: r => money(r.price * r.qty) };
-	COLS.vsnow = { label: "Now", title: "Current price compared to what you posted at", sort: r => (r.cur ? r.cur / r.price : null), cls: "r", fmt: r => (r.cur ? pct((r.cur / r.price - 1) * 100) : `<span class="muted">-</span>`) };
-	el.innerHTML = `<h2>My Auctions</h2><p class="note" style="margin-bottom:12px">Everything you posted with Auctionator (${rows.length} auctions, ${money(total)} total). Auctionator keeps the last ${rows.length ? "few" : ""} postings per item.</p><div id="res"></div>`;
-	list($("#res", el), "posts", rows, ["posted", "item", "price", "qty", "total", "cur", "vsnow"], { sort: "posted", empty: "No postings recorded yet." });
 }
 
 // ---------------------------------------------------------------------------
