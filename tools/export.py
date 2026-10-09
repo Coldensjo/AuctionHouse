@@ -27,6 +27,7 @@ ITEMS_FILE = os.path.join(STATE, "items.json")
 VENDORS_FILE = os.path.join(STATE, "vendors.json")
 ZONES_FILE = os.path.join(HERE, "zones.json")
 SHARDS = 32 # history and tooltip files are split by itemID % SHARDS so the site loads small pieces
+SNAPSHOT_DAYS = 90 # days that can be compared on the market page (every kept scan can be)
 SCAN_DAY_0 = datetime.datetime(2020, 1, 1).timestamp() # Auctionator's day 0 (local midnight)
 
 DEFAULT_CONFIG = {
@@ -477,6 +478,19 @@ def build_realm(realm, items, buckets, auctionator_scan, tcfg):
 			if s and s["all"]:
 				rel.append(low / s["all"])
 		market_scans.append([t, len(scan_items), listings, auctions, value, round(statistics.median(rel) * 100, 1) if rel else None])
+	# Snapshots for comparing two moments on the market page (joke prices left out):
+	# snap/s<time>.json per full scan {id: [lowest, qty, auctions]}, snap/d<day>.json per day {id: [lowest, qty]}.
+	for t, _, scan_items in full:
+		save_json(os.path.join(out, "snap", f"s{t}.json"),
+			{i: [low, qty, n] for i, (low, qty, n, _) in scan_items.items() if (i, t) not in ignored_scans})
+	snap_days = {}
+	for item_id, e in clean.items():
+		for d, v in e["d"].items():
+			if int(d) > today - SNAPSHOT_DAYS:
+				snap_days.setdefault(int(d), {})[item_id] = [v[0], v[2] or 0]
+	for d, snap in snap_days.items():
+		save_json(os.path.join(out, "snap", f"d{d}.json"), snap)
+
 	save_json(os.path.join(out, "market.json"), {
 		"cols": ["day", "items", "listings", "value", "index", "classes"], "days": market_days,
 		"scanCols": ["t", "items", "listings", "auctions", "value", "index"], "scans": market_scans,

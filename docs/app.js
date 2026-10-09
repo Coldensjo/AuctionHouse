@@ -19,6 +19,7 @@ const S = {
 	posting: null,
 	de: null,
 	market: {},
+	snaps: {}, // market snapshots: "<realm>/<scan|day><key>" -> {id: [lowest, qty, ...]}
 	lists: {}, // per-view list state (sort, page)
 };
 
@@ -178,7 +179,8 @@ async function route() {
 		console.error(e);
 		el.innerHTML = `<div class="loading">Something went wrong: ${esc(e.message)}</div>`;
 	}
-	if (view !== "browse" || !params.toString()) window.scrollTo(0, 0);
+	// keep the scroll position for browse filters and for a picked market comparison (it scrolls itself)
+	if ((view !== "browse" || !params.toString()) && !(view === "market" && params.has("from"))) window.scrollTo(0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -611,45 +613,60 @@ async function itemView(el, params, arg, token) {
 // Market overview
 // ---------------------------------------------------------------------------
 
+const SNAPSHOT_DAYS = 90; // days the exporter writes snapshots for (see export.py)
+async function snapshot(by, key) {
+	const k = `${S.realm.slug}/${by}${key}`;
+	return S.snaps[k] || (S.snaps[k] = await load("snap:" + k, () => getJSON(`${S.realm.slug}/snap/${by === "scan" ? "s" : "d"}${key}.json`)));
+}
+
 async function market(el, params, arg, token) {
 	const D = S.data[S.realm.slug];
 	const M = S.market[S.realm.slug] || (S.market[S.realm.slug] = await getJSON(`${S.realm.slug}/market.json`));
 	if (token !== routeToken) return;
-	const days = M.days.map(([d, items, listings, value, index, classes]) => ({ d, items, listings, value, index, classes }));
-	const scans = (M.scans || []).map(([t, items, listings, auctions, value, index]) => ({ t, items, listings, auctions, value, index }));
+	const days = M.days.map(([d, items, listings, value, index, classes]) => ({ key: d, items, listings, value, index, classes }));
+	const scans = (M.scans || []).map(([t, items, listings, auctions, value, index]) => ({ key: t, items, listings, auctions, value, index }));
+	// the whole page follows the chosen mode: every scan, or one point per day
+	const by = params.get("by") === "day" || (!params.get("by") && !scans.length) ? "day" : "scan";
+	const perScan = by === "scan";
+	const pts = perScan ? scans : days;
+	const when = k => (perScan ? timeLong(k) : dayLabel(k, true));
+	const last = pts[pts.length - 1] || {}, prev = pts[pts.length - 2];
 	const lastDay = days[days.length - 1] || {};
-	// headline numbers: the latest full scan against the one before it, or days without scan data
-	const useScans = scans.length > 0;
-	const last = useScans ? scans[scans.length - 1] : lastDay;
-	const prev = useScans ? scans[scans.length - 2] : days[days.length - 2];
 	const now = D.list.filter(it => it.inScan);
 	const fresh = now.filter(it => it.first === D.today && it.seen === 1);
 	const gone = D.list.filter(it => it.last < D.today && it.last >= D.today - 3 && it.seen >= 2);
 	const card = (lbl, val, delta = "") => `<div class="card box"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="delta">${delta}</div></div>`;
-	const vs = useScans ? "vs previous scan" : "vs previous day";
-	const change = (a, b) => (b ? pct((a / b - 1) * 100) + ` <span class="muted">${vs}</span>` : "");
+	const change = (a, b) => (b ? pct((a / b - 1) * 100) + ` <span class="muted">vs previous ${by}</span>` : "");
+	const link = p => href("market", null, new URLSearchParams(Object.entries({ by, ...p }).filter(([, v]) => v != null)));
 
 	const clsRows = Object.entries(lastDay.classes || {}).map(([c, [qty, val]]) => ({ c: +c, qty, val })).sort((a, b) => b.val - a.val);
 	const totalVal = clsRows.reduce((s, r) => s + r.val, 0) || 1;
 
+	const toggle = `<div class="toolbar"><span class="seg">
+		<a class="btn small ${perScan ? "on" : ""}" href="${href("market", null, new URLSearchParams({ by: "scan" }))}">Per Scan (${scans.length})</a>
+		<a class="btn small ${perScan ? "" : "on"}" href="${href("market", null, new URLSearchParams({ by: "day" }))}">Per Day (${days.length})</a></span>
+		<span class="muted">${perScan ? "Every full auction house scan, compared with the one before." : "One point per day, compared with the day before."}</span></div>`;
+
+	const noScans = perScan && !scans.length;
 	el.innerHTML = `
+		${toggle}
+		${noScans ? `<div class="box" style="margin-bottom:14px"><h3>No scans recorded yet</h3><p class="note" style="margin:0">Scans are recorded by the AuctionhouseSync addon: run a full scan with Auctionator, then click <b>Reload &amp; Upload</b> (or /reload, log out or exit). Until then the market can be followed <a href="${link({ by: "day" })}">per day</a>.</p></div>` : `
 		<div class="cards" style="margin-bottom:16px">
 			${card("Items on the AH", num(last.items), change(last.items, prev?.items))}
 			${card("Total Listings", num(last.listings), change(last.listings, prev?.listings))}
-			${useScans ? card("Auctions", num(last.auctions), change(last.auctions, prev?.auctions)) : ""}
+			${perScan ? card("Auctions", num(last.auctions), change(last.auctions, prev?.auctions)) : ""}
 			${card("Market Value", money(last.value), change(last.value, prev?.value))}
 			${card("Price Index", last.index != null ? last.index.toFixed(1) : "-", prev?.index != null ? `${pct(last.index - prev.index)} <span class="muted">points</span>` : "")}
-			${card("Items Tracked", num(D.list.length), `${S.realm.days} days${useScans ? `, ${scans.length} scans` : ""} of history`)}
-			${card("New Today", num(fresh.length), `${num(gone.length)} <span class="muted">gone recently</span>`)}
+			${card(perScan ? "Latest Scan" : "Latest Day", `<span style="font-size:15px">${last.key ? when(last.key) : "-"}</span>`, `${num(D.list.length)} <span class="muted">items tracked</span>`)}
 		</div>
-		${scans.length >= 2 ? `<div class="toolbar"><span class="seg" id="mrange"><button class="btn small" data-r="scans">Per Scan</button><button class="btn small" data-r="days">Daily</button></span></div>` : ""}
 		<div class="grid2" style="margin-bottom:14px">
 			<div class="box"><h3>Market Value</h3><div class="chart short" id="c-value"></div><p class="note">Sum of lowest buyout times quantity for every item on the auction house.</p></div>
 			<div class="box"><h3>Price Index</h3><div class="chart short" id="c-index"></div><p class="note">Median of every item's price relative to its own average. 100 = normal, above = expensive.</p></div>
 			<div class="box"><h3>Listings</h3><div class="chart short" id="c-listings"></div></div>
 			<div class="box"><h3>Distinct Items</h3><div class="chart short" id="c-items"></div></div>
 		</div>
-		${useScans ? `<div class="box" style="margin-bottom:14px"><h3>Recent Scans</h3><div id="scans"></div></div>` : ""}
+		<div class="box" style="margin-bottom:14px"><h3>What Changed</h3><div id="compare"></div></div>
+		<div class="box" style="margin-bottom:14px"><h3>${perScan ? "Scans" : "Days"}</h3><div id="history"></div><p class="note">Click a row to see what changed since the ${by} before it.</p></div>`}
 		<div class="box" style="margin-bottom:14px"><h3>Categories (today)</h3><table class="list"><thead><tr><th class="nosort">Category</th><th class="r nosort">Listings</th><th class="r nosort">Value</th><th class="nosort">Share</th></tr></thead><tbody>
 			${clsRows.map(r => `<tr data-c="${r.c}"><td><a href="${href("browse", null, new URLSearchParams({ c: r.c }))}">${esc(S.items.classes[r.c] || "Unknown")}</a></td><td class="r">${num(r.qty)}</td><td class="r">${money(r.val)}</td><td class="bar-cell"><span class="b" style="width:${(r.val / totalVal * 100).toFixed(1)}%"></span><span>${(r.val / totalVal * 100).toFixed(1)}%</span></td></tr>`).join("")}
 		</tbody></table></div>
@@ -664,27 +681,42 @@ async function market(el, params, arg, token) {
 			<div class="box"><h3>Gone from the Market</h3><div id="l-gone"></div></div>
 		</div>`;
 
-	function drawCharts(mode) {
-		$$("#mrange button", el).forEach(b => b.classList.toggle("on", b.dataset.r === mode));
-		const perScan = mode === "scans";
-		const pts = perScan ? scans : days;
-		const axis = perScan ? { x: scans.map(p => p.t), unit: 3600, xLabel: timeLabel, xLong: timeLong, labelWidth: 96 } : { x: days.map(p => p.d) };
+	if (!noScans) {
+		const axis = perScan ? { x: pts.map(p => p.key), unit: 3600, xLabel: timeLabel, xLong: timeLong, labelWidth: 96 } : { x: pts.map(p => p.key) };
 		const line = (id, values, color, fmt) => chart($(id, el), { ...axis, series: [{ type: "line", values, color, width: 2.5, dots: true, fill: true, name: "", fmt }], yFmt: fmt });
 		line("#c-value", pts.map(p => p.value), "#ffd100", moneyText);
 		line("#c-index", pts.map(p => p.index), "#69ccf0", v => v?.toFixed(1));
 		line("#c-listings", pts.map(p => p.listings), "#a335ee", v => Math.round(v).toLocaleString());
 		line("#c-items", pts.map(p => p.items), "#1eff00", v => Math.round(v).toLocaleString());
-	}
-	const mrange = $("#mrange", el);
-	if (mrange) mrange.onclick = e => { const b = e.target.closest("[data-r]"); if (b) drawCharts(b.dataset.r); };
-	drawCharts(scans.length >= 2 ? "scans" : "days");
 
-	if (useScans) {
-		const rows = scans.slice().reverse().slice(0, 50).map((p, i, arr) => {
-			const prev = arr[i + 1];
-			return `<tr><td>${timeLong(p.t)}</td><td class="r">${num(p.items)}</td><td class="r">${num(p.listings)}</td><td class="r">${num(p.auctions)}</td><td class="r">${money(p.value)}</td><td class="r">${p.index != null ? p.index.toFixed(1) : "-"}</td><td class="r">${prev ? pct((p.value / prev.value - 1) * 100) : "-"}</td></tr>`;
+		// history: newest first; a row opens the comparison with the point before it
+		const rows = pts.slice().reverse().slice(0, 200).map((p, i, arr) => {
+			const before = arr[i + 1];
+			return `<tr data-from="${before ? before.key : ""}" data-to="${p.key}"><td>${when(p.key)}</td><td class="r">${num(p.items)}</td><td class="r">${num(p.listings)}</td>${perScan ? `<td class="r">${num(p.auctions)}</td>` : ""}<td class="r">${money(p.value)}</td><td class="r">${p.index != null ? p.index.toFixed(1) : "-"}</td><td class="r">${before ? pct((p.value / before.value - 1) * 100) : "-"}</td><td class="r">${before ? pct((p.listings / before.listings - 1) * 100) : "-"}</td></tr>`;
 		}).join("");
-		$("#scans", el).innerHTML = `<div class="tbl-wrap" style="max-height:360px;overflow:auto"><table class="list"><thead><tr><th class="nosort">Scan</th><th class="r nosort">Items</th><th class="r nosort">Listings</th><th class="r nosort">Auctions</th><th class="r nosort">Market Value</th><th class="r nosort">Price Index</th><th class="r nosort">Value Change</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+		const hist = $("#history", el);
+		hist.innerHTML = `<div class="tbl-wrap" style="max-height:360px;overflow:auto"><table class="list"><thead><tr><th class="nosort">${perScan ? "Scan" : "Day"}</th><th class="r nosort">Items</th><th class="r nosort">Listings</th>${perScan ? `<th class="r nosort">Auctions</th>` : ""}<th class="r nosort">Market Value</th><th class="r nosort">Price Index</th><th class="r nosort">Value Change</th><th class="r nosort">Listings Change</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+		hist.onclick = e => {
+			const tr = e.target.closest("tr[data-to]");
+			if (tr && tr.dataset.from) location.hash = link({ from: tr.dataset.from, to: tr.dataset.to });
+		};
+
+		// what changed between two points (only points that have snapshots)
+		const keys = pts.map(p => p.key).filter(k => perScan || k > D.today - SNAPSHOT_DAYS);
+		const to = keys.includes(+params.get("to")) ? +params.get("to") : keys[keys.length - 1];
+		const from = keys.includes(+params.get("from")) ? +params.get("from") : keys[keys.indexOf(to) - 1];
+		const options = sel => keys.slice().reverse().map(k => `<option value="${k}" ${k === sel ? "selected" : ""}>${when(k)}</option>`).join("");
+		const cmp = $("#compare", el);
+		if (keys.length < 2) {
+			cmp.innerHTML = `<p class="note" style="margin:0">Needs at least two ${by}s to compare.</p>`;
+		} else {
+			cmp.innerHTML = `<div class="toolbar"><label>From <select id="c-from">${options(from)}</select></label><label>To <select id="c-to">${options(to)}</select></label></div><div id="c-body"><div class="loading">Comparing...</div></div>`;
+			const go = () => { location.hash = link({ from: $("#c-from", el).value, to: $("#c-to", el).value }); };
+			$("#c-from", el).onchange = go;
+			$("#c-to", el).onchange = go;
+			if (params.get("from")) cmp.closest(".box").scrollIntoView({ block: "start" });
+			compare($("#c-body", el), by, from, to, when, token);
+		}
 	}
 
 	const movers = now.filter(it => it.wk != null && it.seen >= 3 && it.a7 >= 100);
@@ -697,6 +729,74 @@ async function market(el, params, arg, token) {
 	top("#l-vol", "vol", now.filter(it => it.seen >= 4), ["item", "vol", "min", "max"], "vol");
 	top("#l-new", "new", fresh, ["item", "cur", "av"], "cur");
 	top("#l-gone", "gone", gone, ["item", "a30", "last"], "a30");
+}
+
+// Columns for comparing two snapshots
+Object.assign(COLS, {
+	pFrom: { label: "Before", sort: r => r.pFrom, cls: "r", fmt: r => money(r.pFrom) },
+	pTo: { label: "After", sort: r => r.pTo, cls: "r", fmt: r => money(r.pTo) },
+	pChg: { label: "Change", sort: r => r.pChg, cls: "r", fmt: r => pct(r.pChg) },
+	qFrom: { label: "Qty Before", sort: r => r.qFrom, cls: "r", fmt: r => num(r.qFrom) },
+	qTo: { label: "Qty After", sort: r => r.qTo, cls: "r", fmt: r => num(r.qTo) },
+	qGone: { label: "Gone", title: "Quantity that disappeared: bought, cancelled or expired", sort: r => r.qGone, cls: "r", fmt: r => num(r.qGone) },
+	goneVal: { label: "Worth", title: "Quantity gone x the price before", sort: r => r.goneVal, cls: "r", fmt: r => money(r.goneVal) },
+	newVal: { label: "Listed Value", title: "Quantity x price", sort: r => r.newVal, cls: "r", fmt: r => money(r.newVal) },
+});
+Object.assign(COL_WIDTHS, { qFrom: 88, qTo: 88, qGone: 70 });
+for (const c of ["pFrom", "pTo", "goneVal", "newVal"]) MONEY_COLS.add(c);
+PCT_COLS.add("pChg");
+
+async function compare(box, by, from, to, when, token) {
+	const D = S.data[S.realm.slug];
+	let A, B;
+	try {
+		[A, B] = await Promise.all([snapshot(by, from), snapshot(by, to)]);
+	} catch (e) {
+		box.innerHTML = `<p class="note">No snapshot for that ${by}.</p>`;
+		return;
+	}
+	if (token !== routeToken) return;
+	const rows = [];
+	for (const id of new Set([...Object.keys(A), ...Object.keys(B)])) {
+		const a = A[id], b = B[id];
+		const it = D.byId.get(+id) || { id: +id, ...itemMeta(+id) };
+		const r = { ...it, pFrom: a?.[0] ?? null, pTo: b?.[0] ?? null, qFrom: a?.[1] ?? 0, qTo: b?.[1] ?? 0 };
+		r.pChg = a && b ? (b[0] / a[0] - 1) * 100 : null;
+		r.qGone = Math.max(0, r.qFrom - r.qTo);
+		r.goneVal = a ? r.qGone * a[0] : 0;
+		r.newVal = b ? b[0] * b[1] : 0;
+		r.kind = a && b ? "both" : a ? "gone" : "new";
+		rows.push(r);
+	}
+	const both = rows.filter(r => r.kind === "both");
+	// rise/drop lists skip items under 1 silver: 1c -> 2c is +100% but means nothing
+	const up = both.filter(r => r.pChg > 0 && Math.min(r.pFrom, r.pTo) >= 100), down = both.filter(r => r.pChg < 0 && Math.min(r.pFrom, r.pTo) >= 100);
+	const appeared = rows.filter(r => r.kind === "new"), vanished = rows.filter(r => r.kind === "gone");
+	const sold = rows.filter(r => r.qGone > 0);
+	const sum = (xs, f) => xs.reduce((s, r) => s + f(r), 0);
+	const qA = sum(rows, r => r.qFrom), qB = sum(rows, r => r.qTo);
+	const card = (lbl, val, delta = "") => `<div class="card box"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="delta">${delta}</div></div>`;
+	box.innerHTML = `
+		<p class="note" style="margin:0 0 10px">From <b>${when(from)}</b> to <b>${when(to)}</b>.</p>
+		<div class="cards" style="margin-bottom:14px">
+			${card("Prices Up", num(both.filter(r => r.pChg > 0).length), `<span class="muted">of</span> ${num(both.length)} <span class="muted">items in both</span>`)}
+			${card("Prices Down", num(both.filter(r => r.pChg < 0).length), `${num(both.filter(r => r.pChg === 0).length)} <span class="muted">unchanged</span>`)}
+			${card("New Items", num(appeared.length), `${num(vanished.length)} <span class="muted">items gone</span>`)}
+			${card("Listings", num(qB), `${pct(qA ? (qB / qA - 1) * 100 : null)} <span class="muted">from</span> ${num(qA)}`)}
+			${card("Quantity Gone", num(sum(sold, r => r.qGone)), `<span class="muted">worth</span> ${money(sum(sold, r => r.goneVal))}`)}
+		</div>
+		<div class="grid2">
+			<div class="box"><h3>Biggest Price Rises</h3><div id="x-up"></div></div>
+			<div class="box"><h3>Biggest Price Drops</h3><div id="x-down"></div></div>
+			<div class="box"><h3>Most Bought (Quantity Gone)</h3><div id="x-sold"></div><p class="note">Quantity that disappeared between the two: bought, cancelled or expired.</p></div>
+			<div class="box"><h3>Newly Listed Items</h3><div id="x-new"></div></div>
+		</div>`;
+	const key = `cmp:${by}:${S.realm.slug}:`;
+	const opts = (sort, dir = -1) => ({ sort, dir, pageSize: 10, resetPage: true });
+	list($("#x-up", box), key + "up", up, ["item", "pFrom", "pTo", "pChg"], opts("pChg"));
+	list($("#x-down", box), key + "down", down, ["item", "pFrom", "pTo", "pChg"], opts("pChg", 1));
+	list($("#x-sold", box), key + "sold", sold, ["item", "qFrom", "qTo", "goneVal"], opts("goneVal"));
+	list($("#x-new", box), key + "new", appeared, ["item", "pTo", "qTo", "newVal"], opts("newVal"));
 }
 
 // ---------------------------------------------------------------------------
