@@ -87,13 +87,31 @@ local function FullScanDone()
 	end
 end
 
-local function OnProcessScan(_, itemIndexes)
+-- Calls FullScanDone once Auctionator has finished writing the scan into its own price database
+local function FullScanDoneWhenProcessed(database)
+	local waited = 0
+	local ticker
+	ticker = C_Timer.NewTicker(0.5, function()
+		waited = waited + 0.5
+		if not database.ticker or database.ticker:IsCancelled() or waited >= 30 then
+			ticker:Cancel()
+			FullScanDone()
+		end
+	end)
+end
+
+local function OnProcessScan(database, itemIndexes)
 	if type(itemIndexes) ~= "table" then return end
 	local data, count = Summarize(itemIndexes)
 	if count == 0 then return end
 	pending = { t = time(), realm = RealmKey(), faction = UnitFactionGroup("player"), full = false, n = count, data = data }
 	table.insert(db.scans, pending)
 	Prune()
+	-- Auctionator's scan complete event does not always reach us, so a scan processed from
+	-- Auctionator's full scan code counts as a full scan too
+	if (debugstack(2) or ""):find("FullScan") then
+		FullScanDoneWhenProcessed(database)
+	end
 end
 
 local function HookDatabase()
