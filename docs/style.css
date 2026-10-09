@@ -154,7 +154,7 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .list th.sorted::after { content: " \25BC"; font-size: 9px; }
 .list th.sorted.asc::after { content: " \25B2"; }
 .list th.nosort { cursor: default; }
-.list td { padding: 3px 8px; border-bottom: 1px solid rgba(255, 255, 255, .04); }
+.list td { vertical-align: middle; padding: 3px 8px; border-bottom: 1px solid rgba(255, 255, 255, .04); }
 .list tbody tr:nth-child(even) { background: var(--row); }
 .list tbody tr { cursor: pointer; }
 .list tbody tr:hover { background: linear-gradient(90deg, rgba(80, 140, 255, .32), rgba(80, 140, 255, .08)); }
@@ -258,6 +258,12 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .bar-cell span { position: relative; }
 .note { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
 .pill { display: inline-block; padding: 0 7px; border-radius: 9px; font-size: 11.5px; border: 1px solid currentColor; opacity: .9; }
+.pill.ally, .ally { color: #4a9eff; }
+.pill.horde, .horde { color: #ff4a3a; }
+.pill.limited { color: var(--q5); }
+.vendor { padding: 6px 0; border-bottom: 1px solid rgba(232, 204, 122, .12); font-size: 13.5px; }
+.vendor:last-child { border-bottom: none; }
+.vendor .money { margin-left: 10px; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 12px; }
 .toolbar .grow { flex: 1; }
 

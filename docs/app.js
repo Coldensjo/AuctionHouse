@@ -139,7 +139,7 @@ function href(view, arg, params) {
 	return `#/${S.realm.slug}/${view}${arg != null ? "/" + encodeURIComponent(arg) : ""}${qs}`;
 }
 
-const VIEWS = { browse, item: itemView, market, deals, disenchant, flips, posts };
+const VIEWS = { browse, item: itemView, market, deals, disenchant, flips, recipes, posts };
 let routeToken = 0;
 async function route() {
 	const { realm, view, arg, params } = parseHash();
@@ -398,9 +398,10 @@ async function itemView(el, params, arg, token) {
 	const id = +arg;
 	const D = S.data[S.realm.slug];
 	const it = D.byId.get(id) || { id, ...itemMeta(id), missing: true };
-	const [hist, tt] = await Promise.all([itemHistory(id), tooltipHtml(id), load("de", async () => (S.de = await getJSON("disenchant.json"))), loadPosting()]);
+	const [hist, tt] = await Promise.all([itemHistory(id), tooltipHtml(id), load("de", async () => (S.de = await getJSON("disenchant.json"))), loadPosting(), loadVendors()]);
 	if (token !== routeToken) return;
 	const posts = (S.posting[id] || []).slice().reverse();
+	const soldBy = S.vendors[id] || [];
 	const sub = [it.ilvl ? `Item Level ${it.ilvl}` : "", it.req ? `Requires Level ${it.req}` : "", [className(it), subName(it)].filter(Boolean).join(" &rsaquo; "), S.items.slots[it.slot] || ""].filter(Boolean).join(" &middot; ");
 
 	if (it.missing) {
@@ -456,6 +457,8 @@ async function itemView(el, params, arg, token) {
 					<span>Vendor buy price</span><span>${it.buy ? money(it.buy) : "-"}</span>
 					${it.sell && fromAH != null ? `<span>Vendor flip</span><span>${money(it.sell - fromAH)}</span>` : ""}
 				</div></div>
+				${soldBy.length ? `<div class="box"><h3>Sold by Vendors</h3>${vendorList(soldBy)}
+					${fromAH != null ? `<div class="kv" style="margin-top:8px"><span>Auction house vs cheapest vendor</span><span>${pct((fromAH / Math.min(...soldBy.map(n => n.cost || Infinity)) - 1) * 100)}</span></div>` : ""}</div>` : ""}
 				${posts.length ? `<div class="box"><h3>My Auctions</h3><table class="list"><thead><tr><th class="nosort">Posted</th><th class="r nosort">Each</th><th class="r nosort">Qty</th><th class="r nosort">vs now</th></tr></thead><tbody>
 					${posts.map(([t, p, q]) => `<tr><td>${new Date(t * 1000).toLocaleDateString()}</td><td class="r">${money(p)}</td><td class="r">${q}</td><td class="r">${pct(it.cur ? (p / it.cur - 1) * 100 : null)}</td></tr>`).join("")}
 				</tbody></table></div>` : ""}
@@ -666,6 +669,71 @@ async function flips(el) {
 	COLS.buy = { label: "Vendor Price", sort: it => it.buy, cls: "r", fmt: it => money(it.buy) };
 	COLS.markup = { label: "Markup", sort: it => it.cur / it.buy, cls: "r", fmt: it => pct((it.cur / it.buy - 1) * 100) };
 	list($("#res2", el), "vbuy", D.list.filter(it => it.inScan && it.buy && it.cur > it.buy), ["item", "buy", "cur", "markup", "av"], { sort: "markup" });
+}
+
+// ---------------------------------------------------------------------------
+// Vendor recipes: recipes an NPC sells, compared with their auction price
+// ---------------------------------------------------------------------------
+
+function loadVendors() {
+	return load("vendors", async () => (S.vendors = await getJSON("vendors.json")));
+}
+// Neutral vendors (friendly to neither in the data) sell to both factions.
+const sellsTo = (n, fac) => (fac === "A" ? n.a || !n.h : fac === "H" ? n.h || !n.a : true);
+function vendorList(npcs) {
+	return npcs.map(n => `<div class="vendor"><span class="money" style="float:right">${money(n.cost)}</span>
+		<b>${esc(n.name)}</b> ${n.a && !n.h ? `<span class="pill ally">Alliance</span>` : n.h && !n.a ? `<span class="pill horde">Horde</span>` : ""}
+		${n.stock > 0 ? `<span class="pill limited" title="The vendor only has ${n.stock} at a time, restocking over time">Limited ${n.stock}</span>` : ""}
+		<div class="muted">${esc([n.tag, n.zone].filter(Boolean).join(" · "))}</div></div>`).join("");
+}
+
+async function recipes(el, params, arg, token) {
+	await loadVendors();
+	if (token !== routeToken) return;
+	const D = S.data[S.realm.slug];
+	const f = S.lists["recipes:f"] || (S.lists["recipes:f"] = { fac: "", prof: "", now: true, limited: false });
+	const all = Object.keys(S.vendors).map(Number).filter(id => D.byId.has(id)).map(id => D.byId.get(id));
+	const profs = [...new Set(all.map(subName))].filter(Boolean).sort();
+	el.innerHTML = `<h2>Vendor Recipes</h2>
+		<p class="note" style="margin-bottom:12px">Recipes a vendor sells that also show up on the auction house. A positive difference means the auction house asks more than the vendor: buy from the vendor (and resell). Negative means the auction house is the cheaper place to buy.</p>
+		<div class="toolbar">
+			<label>Faction <select data-k="fac"><option value="">Both</option><option value="A">Alliance</option><option value="H">Horde</option></select></label>
+			<label>Profession <select data-k="prof"><option value="">All</option>${profs.map(p => `<option>${esc(p)}</option>`).join("")}</select></label>
+			<label class="chk"><input type="checkbox" data-k="now"> On the AH now</label>
+			<label class="chk"><input type="checkbox" data-k="limited"> Limited stock only</label>
+		</div><div id="res"></div>`;
+	const bar = $(".toolbar", el);
+	for (const input of $$("[data-k]", bar)) {
+		if (input.type === "checkbox") input.checked = f[input.dataset.k];
+		else input.value = f[input.dataset.k];
+	}
+	COLS.prof = { label: "Profession", sort: it => subName(it), fmt: it => esc(subName(it)) };
+	COLS.vprice = { label: "Vendor", title: "Cheapest vendor price for the chosen faction", sort: it => it.vprice, cls: "r", fmt: it => money(it.vprice) };
+	COLS.vdiff = { label: "AH - Vendor", title: "Auction price minus vendor price", sort: it => it.cur - it.vprice, cls: "r", fmt: it => money(it.cur - it.vprice) };
+	COLS.vmargin = { label: "Margin", title: "Auction price compared to the vendor price", sort: it => it.cur / it.vprice, cls: "r", fmt: it => pct((it.cur / it.vprice - 1) * 100) };
+	const npcLine = n => `<span class="${n.a && !n.h ? "ally" : n.h && !n.a ? "horde" : ""}">${esc(n.name)}</span>${n.zone ? ` <span class="muted">(${esc(n.zone)})</span>` : ""}${n.stock > 0 ? ` <span class="pill limited">Limited</span>` : ""}`;
+	COLS.npcs = { label: "Sold By", sort: it => it.npcs[0]?.name || "", fmt: it => {
+		const more = it.npcs.length - 2;
+		const title = it.npcs.map(n => `${n.name}${n.zone ? ` (${n.zone})` : ""}`).join("\n");
+		return it.npcs.slice(0, 2).map(npcLine).join("<br>") + (more > 0 ? `<br><span class="muted" title="${esc(title)}">+${more} more</span>` : "");
+	} };
+	const render = reset => {
+		const rows = [];
+		for (const it of all) {
+			const npcs = S.vendors[it.id].filter(n => sellsTo(n, f.fac) && n.cost);
+			if (!npcs.length || (f.now && !it.inScan) || (f.prof && subName(it) !== f.prof) || (f.limited && !npcs.some(n => n.stock > 0))) continue;
+			npcs.sort((a, b) => a.cost - b.cost);
+			rows.push({ ...it, npcs, vprice: npcs[0].cost });
+		}
+		list($("#res", el), "recipes", rows, ["item", "prof", "vprice", "cur", "vdiff", "vmargin", "a30", "av", "npcs"], { sort: "vdiff", resetPage: reset, empty: "No vendor recipes match." });
+	};
+	bar.oninput = e => {
+		const k = e.target.dataset.k;
+		if (!k) return;
+		f[k] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+		render(true);
+	};
+	render();
 }
 
 function loadPosting() {

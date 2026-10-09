@@ -219,9 +219,10 @@ def update_items(items, ids, workers=8):
 		list(ex.map(one, todo))
 	return len(todo)
 
-def _listview_rows(page):
-	"""Rows of Wowhead's `var listviewitems = [...]` (a JS literal: mostly JSON plus a few bare keys)."""
-	m = re.search(r"var listviewitems\s*=\s*\[", page)
+def _listview_rows(page, start=r"var listviewitems\s*=\s*\["):
+	"""Rows of a Wowhead listview array that `start` leads up to, by default `var listviewitems = [...]`
+	(a JS literal: mostly JSON plus a few bare keys)."""
+	m = re.search(start, page, re.S)
 	if not m:
 		return []
 	i = j = m.end() - 1
@@ -285,6 +286,48 @@ def update_classes(items):
 				got += 1
 			m["classed"] = True # not listed at all: keep what the tooltip gave
 	return got
+
+VENDOR_RECHECK_DAYS = 30 # vendor lists rarely change; ask again after this long
+
+def update_vendors(items, vendors, zones):
+	"""Fills `vendors` ({id: {"checked": t, "sold": [...]}}) with the NPCs that sell each recipe (item class 9),
+	read from the "Sold by" tab of the recipe's Wowhead page. Returns the number of pages fetched."""
+	now = int(time.time())
+	todo = sorted((i for i, m in items.items() if m and m.get("c") == 9
+		and now - vendors.get(i, {}).get("checked", 0) > VENDOR_RECHECK_DAYS * 86400), key=int)
+	if not todo:
+		return 0
+	print(f"checking vendors for {len(todo)} recipes on Wowhead...")
+	_rate["delay"] = max(_rate["delay"], 1.5) # full item pages: Wowhead blocks faster requests
+	done = 0
+	for i in todo:
+		try:
+			page = fetch(f"https://www.wowhead.com/forever/item={i}", tries=3)
+		except Exception as e:
+			print(f"  Wowhead unavailable ({e}); will continue on the next export", file=sys.stderr)
+			break
+		sold = []
+		for npc in _listview_rows(page or "", r"id: 'sold-by'.*?data:\s*\[") if page else []:
+			cost = (npc.get("cost") or [None])[0] # [[copper, ...]]
+			if isinstance(cost, list):
+				cost = cost[0] if cost else None
+			copper = cost if isinstance(cost, int) else None
+			react = npc.get("react") or [None, None]
+			sold.append({
+				"npc": npc.get("id"),
+				"name": npc.get("name") or npc.get("displayName") or "",
+				"tag": npc.get("tag") or "",
+				"zone": next((zones[str(z)] for z in npc.get("location") or [] if str(z) in zones), ""),
+				"a": react[0] == 1, # Alliance can buy (friendly)
+				"h": len(react) > 1 and react[1] == 1, # Horde can buy
+				"stock": npc.get("stock", -1), # -1 = unlimited
+				"cost": copper,
+			})
+		vendors[i] = {"checked": now, "sold": sold}
+		done += 1
+		if done % 50 == 0:
+			print(f"  {done}/{len(todo)}")
+	return done
 
 def update_icons(items, icon_dir):
 	"""Downloads every icon the items use into icon_dir (56x56 jpg). Returns the number downloaded."""

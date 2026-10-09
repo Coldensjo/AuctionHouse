@@ -26,6 +26,8 @@ WoW only writes saved variables on `/reload`, logout or exit, so do one of those
 - **Deals**: items listed below their 30 day average.
 - **Disenchant**: items worth more disenchanted than their buyout, enchanting material prices, and value per item level.
 - **Vendor Flips**: items listed below vendor price, and vendor items listed above vendor price.
+- **Vendor Recipes**: recipes a vendor sells that are also on the auction house, vendor price vs auction price,
+  with the vendors' names, zones, faction and limited stock. Filter by faction and profession.
 - **My Auctions**: your Auctionator posting history compared with current prices.
 
 Hover any item for its in-game tooltip with auction, average, disenchant and vendor prices. Press `/` to search.
@@ -36,7 +38,8 @@ Hover any item for its in-game tooltip with auction, average, disenchant and ven
   stores each realm as CBOR with daily low/high prices and quantities, and keeps only 21 days of it.
 - `archive/<realm>.json` keeps every day ever seen, so history grows past Auctionator's limit. Commit it.
 - Item names, tooltips, classes and icons come from Wowhead's `forever` database and are fetched once.
-  They are stored in `data/items.json` and `docs/icons/`.
+  They are stored in `data/items.json` and `docs/icons/`. Which vendors sell each recipe comes from the
+  recipe's Wowhead page. That is stored in `data/vendors.json` and rechecked every 30 days.
 - `docs/` is the static site (plain HTML, CSS and JS, no build step). Data is split into small files so pages load fast.
 
 ## Settings (`config.json`)

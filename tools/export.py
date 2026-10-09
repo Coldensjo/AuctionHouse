@@ -18,6 +18,8 @@ DOCS = os.path.join(ROOT, "docs")
 DATA = os.path.join(DOCS, "data")
 ARCHIVE = os.path.join(ROOT, "archive")
 ITEMS_FILE = os.path.join(ROOT, "data", "items.json")
+VENDORS_FILE = os.path.join(ROOT, "data", "vendors.json")
+ZONES_FILE = os.path.join(HERE, "zones.json")
 SHARDS = 32 # history and tooltip files are split by itemID % SHARDS so the site loads small pieces
 SCAN_DAY_0 = datetime.datetime(2020, 1, 1).timestamp() # Auctionator's day 0 (local midnight)
 
@@ -296,6 +298,7 @@ def export(cfg, fetch=True):
 
 	# Item metadata and icons
 	items = load_json(ITEMS_FILE, {})
+	vendors = load_json(VENDORS_FILE, {})
 	ids = set(disenchant.MATERIALS)
 	for arc in archives.values():
 		ids |= {int(i) for i in arc["items"]}
@@ -305,6 +308,9 @@ def export(cfg, fetch=True):
 		if wowhead.update_classes(items) or changed:
 			save_json(ITEMS_FILE, items)
 		wowhead.update_icons(items, os.path.join(DOCS, "icons"))
+		mine = {str(i): items.get(str(i)) for i in ids}
+		if wowhead.update_vendors(mine, vendors, load_json(ZONES_FILE, {})):
+			save_json(VENDORS_FILE, vendors)
 	else:
 		wowhead.update_items(items, [i for i in sorted(ids) if os.path.exists(os.path.join(wowhead.CACHE, "xml", f"{i}.xml"))])
 
@@ -350,6 +356,8 @@ def export(cfg, fetch=True):
 	for n in range(SHARDS):
 		save_json(os.path.join(DATA, "tt", f"{n}.json"), tooltips.get(n, {}))
 
+	# NPCs selling each recipe (only recipes a vendor sells)
+	save_json(os.path.join(DATA, "vendors.json"), {i: v["sold"] for i, v in vendors.items() if v.get("sold") and int(i) in ids})
 	save_json(os.path.join(DATA, "posting.json"), {i: sorted(p.values()) for i, p in posting.items()})
 	save_json(os.path.join(DATA, "disenchant.json"), {
 		"materials": disenchant.MATERIALS,
