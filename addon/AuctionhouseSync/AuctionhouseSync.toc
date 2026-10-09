@@ -1,0 +1,9 @@
+## Interface: 11508, 11509, 20506, 38000, 50504
+## Title: Auctionhouse Sync
+## Notes: Records every Auctionator scan for the auction house website, and offers a reload after a full scan so it can be uploaded.
+## Author: Siz
+## Version: 1.0.0
+## Dependencies: Auctionator
+## SavedVariables: AuctionhouseSyncDB
+
+AuctionhouseSync.lua

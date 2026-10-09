@@ -2,27 +2,37 @@
 
 A World of Warcraft Classic styled website for your Auctionator scan data, hosted on GitHub Pages.
 
-Scan the auction house in game with Auctionator, then run **`upload.bat`**. It reads the scan data
-WoW saved, merges it into a permanent price archive, builds the site data and pushes it to GitHub.
-Pages updates a minute or two later.
+## Uploading scans automatically
+
+1. Run **`install-autostart.bat`** once. The sync program then runs hidden every time you log in to Windows.
+   It also installs the **AuctionhouseSync** addon into WoW, so restart WoW or `/reload` once afterwards.
+2. Scan the auction house with Auctionator as usual. When a full scan finishes, the addon asks
+   **Reload & Upload**. Click it, and the scan is on the website a minute or two later.
+
+WoW only writes addon data to disk on `/reload`, logout or exit, so that is when a scan can be uploaded.
+If you click **Later**, the scan is kept and uploaded on your next reload, logout or exit.
 
 | Script | What it does |
 | --- | --- |
+| `install-autostart.bat` | Start the sync hidden at every Windows login (and now) |
+| `uninstall-autostart.bat` | Stop it and remove it from startup |
+| `sync.bat` | Run the sync in a window instead (close the window to stop) |
 | `upload.bat` | Export and upload once |
-| `watch.bat` | Stay running and upload every time WoW saves new scan data |
 | `preview.bat` | Export without uploading and open the site locally |
 
-WoW only writes saved variables on `/reload`, logout or exit, so do one of those after a scan.
+The sync log is `state/sync.log`. In game, `/ahsync` shows how many scans are stored, `/ahsync popup`
+turns the reload question on or off.
 
 ## What the site shows
 
 - **Browse**: the Classic auction house browser. Category tree, name, level, rarity and price filters, sortable columns.
-- **Item pages**: current price, 3/7/14/30 day and all-time averages, lowest and highest ever, volatility,
-  price history chart (daily range, price, 30 day average, quantity listed), best weekday to buy and sell,
-  daily history, disenchant breakdown (era table and your own results from DisenchantValue), vendor prices,
-  and your own postings.
-- **Market**: market value, listings, distinct items and a price index over time. Also a category breakdown,
-  the biggest risers and fallers, the most listed, valuable, expensive and volatile items, and items new to or gone from the market.
+- **Item pages**: current price, auctions and median in the latest scan, 3/7/14/30 day and all-time averages,
+  lowest and highest ever, volatility, price history per scan and per day, best time of day and best weekday
+  to buy and sell, every scan and every day in tables, disenchant breakdown (era table and your own results
+  from DisenchantValue), vendor prices and vendors, and your own postings.
+- **Market**: items, listings, auctions, market value and a price index per scan and per day, recent scans,
+  a category breakdown, the biggest risers and fallers, the most listed, valuable, expensive and volatile
+  items, and items new to or gone from the market.
 - **Deals**: items listed below their 30 day average.
 - **Disenchant**: items worth more disenchanted than their buyout, enchanting material prices, and value per item level.
 - **Vendor Flips**: items listed below vendor price, and vendor items listed above vendor price.
@@ -33,19 +43,30 @@ Hover any item for its in-game tooltip with auction, average, disenchant and ven
 
 ## How it works
 
-- `tools/export.py` reads `WTF/Account/*/SavedVariables/Auctionator.lua` for every account. Auctionator
-  stores each realm as CBOR with daily low/high prices and quantities, and keeps only 21 days of it.
-- `archive/<realm>.json` keeps every day ever seen, so history grows past Auctionator's limit. Commit it.
+- Auctionator keeps one low/high price and quantity per item per day, for 21 days. The **AuctionhouseSync**
+  addon (`addon/`) hooks Auctionator's scan processing and records every scan with its time and, per item,
+  the lowest price, quantity, number of auctions and median price.
+- `tools/sync.py` watches WoW's saved variables and runs `tools/export.py` whenever they change.
+- `tools/export.py` reads `WTF/Account/*/SavedVariables/` for every account and merges everything into
+  `state/archive/<realm>/`. `daily.json` keeps every day forever. `scans/<day>.json` keeps per-scan detail for
+  `scan_history_days`, and each day's scan average and count are kept in the daily history after that.
 - Item names, tooltips, classes and icons come from Wowhead's `forever` database and are fetched once.
-  They are stored in `data/items.json` and `docs/icons/`. Which vendors sell each recipe comes from the
-  recipe's Wowhead page. That is stored in `data/vendors.json` and rechecked every 30 days.
-- `docs/` is the static site (plain HTML, CSS and JS, no build step). Data is split into small files so pages load fast.
+  They are stored in `state/items.json` and `state/icons/`. Which vendors sell each recipe comes from the
+  recipe's Wowhead page. That is stored in `state/vendors.json` and rechecked every 30 days.
+- The site is built into `site/` from `docs/` (plain HTML, CSS and JS, no build step) plus the data, split
+  into small files so pages load fast. `site/` is published to the `gh-pages` branch as a single commit that
+  is replaced on every upload, so frequent uploads do not grow the repository.
+- `state/` is not in git. A copy is published with the site under `_state/`, and a fresh clone restores it
+  from there automatically on its first export.
 
 ## Settings (`config.json`)
 
 - `wow_path`: your WoW install folder (the one containing `WTF`).
 - `realm_aliases`: merge realms, for example `{"ClassicBetaPvP": "PvP"}` if a realm was renamed.
 - `hide_realms`: realm names to leave off the site.
+- `realm_order`: order of the realm dropdown.
+- `scan_history_days`: how long per-scan detail is kept (daily history is kept forever).
+- `check_interval_seconds`: how often the sync looks for new data.
 - `site_title`: header title.
 - `push`: set `false` to only export.
 

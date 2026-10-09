@@ -1,4 +1,5 @@
 {
+	"check_interval_seconds": 10,
 	"hide_realms": [
 		"ClassicBetaPvP",
 		"ClassicBetaPvE",
@@ -12,6 +13,7 @@
 		"RP",
 		"Hardcore"
 	],
+	"scan_history_days": 45,
 	"site_title": "Auction House",
 	"wow_path": "C:/Program Files (x86)/World of Warcraft/_classic_beta_"
 }

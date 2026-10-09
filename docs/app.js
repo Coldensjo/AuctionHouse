@@ -45,7 +45,7 @@ async function loadRealm(slug) {
 			const it = {};
 			cols.forEach((c, i) => (it[c] = row[i]));
 			Object.assign(it, itemMeta(it.id));
-			it.inScan = it.last === idx.today;
+			it.inScan = it.inScan == null ? it.last === idx.today : !!it.inScan; // in the latest full scan
 			it.deProfit = it.de && it.inScan ? it.de - it.cur : null;
 			it.flip = it.sell && it.inScan ? it.sell - it.cur : null;
 			list.push(it);
@@ -66,7 +66,8 @@ const shardOf = id => id % S.meta.shards;
 async function itemHistory(id) {
 	const key = `${S.realm.slug}/${shardOf(id)}`;
 	if (!S.hist[key]) S.hist[key] = await load("h:" + key, () => getJSON(`${S.realm.slug}/h/${shardOf(id)}.json`));
-	return S.hist[key][id] || [];
+	const h = S.hist[key][id] || { d: [], s: [] };
+	return Array.isArray(h) ? { d: h, s: [] } : h; // older exports: daily rows only
 }
 async function tooltipHtml(id) {
 	const n = shardOf(id);
@@ -115,8 +116,15 @@ const dayDate = d => new Date((S.meta.day0 + d * 86400 + 43200) * 1000);
 const dayLabel = (d, long) => dayDate(d).toLocaleDateString(undefined, long ? { weekday: "short", year: "numeric", month: "short", day: "numeric" } : { month: "short", day: "numeric" });
 function ago(day) {
 	const n = S.data[S.realm.slug].today - day;
-	return n <= 0 ? `<span class="up">Latest scan</span>` : n === 1 ? "1 day ago" : `${n} days ago`;
+	return n <= 0 ? `<span class="up">Today</span>` : n === 1 ? "1 day ago" : `${n} days ago`;
 }
+// When an item was last seen: "Latest scan" if it is in the newest full scan, else how long ago.
+function seenAgo(it) {
+	if (it.inScan) return `<span class="up">Latest scan</span>`;
+	return it.last === S.data[S.realm.slug].today && it.curT ? timeAgo(it.curT) : ago(it.last);
+}
+const timeLabel = t => new Date(t * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const timeLong = t => new Date(t * 1000).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 function timeAgo(ts) {
 	const s = Date.now() / 1000 - ts;
 	if (s < 3600) return `${Math.max(1, Math.round(s / 60))} min ago`;
@@ -152,7 +160,7 @@ async function route() {
 	const token = ++routeToken;
 	S.realm = realm;
 	$("#realm").value = realm.slug;
-	$("#scan-info").innerHTML = `Last scan <b>${timeAgo(realm.lastScan)}</b><br>${realm.items.toLocaleString()} items &middot; ${realm.days} days of history`;
+	$("#scan-info").innerHTML = `Last scan <b>${timeAgo(realm.lastScan)}</b><br>${realm.items.toLocaleString()} items &middot; ${realm.days} days${realm.scans ? ` &middot; ${realm.scans} scans` : ""} of history`;
 	const tab = view === "item" ? null : view;
 	$$("#tabs a").forEach(a => {
 		a.classList.toggle("on", a.dataset.view === tab);
@@ -188,10 +196,12 @@ const COLS = {
 	max: { label: "Highest", sort: it => it.max, cls: "r", fmt: it => money(it.max) },
 	vs30: { label: "vs 30d", title: "Current price compared to the 30 day average", sort: it => it.vs30, cls: "r", fmt: it => pct(it.vs30) },
 	wk: { label: "7d Trend", title: "Price change over the last ~7 days", sort: it => it.wk, cls: "r", fmt: it => pct(it.wk) },
-	chg: { label: "Day", title: "Change since the previous day it was seen", sort: it => it.chg, cls: "r", fmt: it => pct(it.chg) },
+	chg: { label: "Change", title: "Change since the previous scan it was in (or the previous day without scan data)", sort: it => it.chg, cls: "r", fmt: it => pct(it.chg) },
+	n: { label: "Auctions", title: "Number of auctions in the latest scan", sort: it => it.n, cls: "r", fmt: it => num(it.n) },
+	med: { label: "Median", title: "Median unit price of all auctions in the latest scan", sort: it => it.med, cls: "r", fmt: it => money(it.med) },
 	vol: { label: "Volatility", title: "Standard deviation of daily prices, as % of the average", sort: it => it.vol, cls: "r", fmt: it => (it.seen > 1 ? it.vol.toFixed(0) + "%" : `<span class="muted">-</span>`) },
 	seen: { label: "Days", title: "Days this item has been seen on the auction house", sort: it => it.seen, cls: "r", fmt: it => it.seen },
-	last: { label: "Seen", sort: it => it.last, cls: "r", fmt: it => ago(it.last) },
+	last: { label: "Seen", sort: it => it.curT || it.last, cls: "r", fmt: seenAgo },
 	de: { label: "Disenchant", title: "Expected disenchant value at current material prices (era table)", sort: it => it.de, cls: "r", fmt: it => money(it.de) },
 	deProfit: { label: "DE Profit", sort: it => it.deProfit, cls: "r", fmt: it => money(it.deProfit) },
 	sell: { label: "Vendor", title: "Vendor sell price", sort: it => it.sell, cls: "r", fmt: it => (it.sell ? money(it.sell) : `<span class="muted">-</span>`) },
@@ -202,9 +212,9 @@ const COLS = {
 };
 
 // Fixed column widths, so sorting or a very long price never shifts the columns. The item column takes the rest.
-const MONEY_COLS = new Set(["cur", "a7", "a30", "all", "min", "max", "de", "deProfit", "sell", "flip", "value", "gain", "vprice", "vdiff", "buy", "price", "total"]);
+const MONEY_COLS = new Set(["med", "cur", "a7", "a30", "all", "min", "max", "de", "deProfit", "sell", "flip", "value", "gain", "vprice", "vdiff", "buy", "price", "total"]);
 const PCT_COLS = new Set(["vs30", "wk", "chg", "discount", "vmargin", "markup", "vsnow"]);
-const COL_WIDTHS = { item: 0, req: 44, ilvl: 50, av: 64, seen: 56, last: 96, vol: 84, prof: 116, npcs: 270, posted: 176, qty: 52 };
+const COL_WIDTHS = { item: 0, req: 44, ilvl: 50, av: 64, n: 74, seen: 56, last: 96, vol: 84, prof: 116, npcs: 270, posted: 176, qty: 52 };
 function colWidth(c) {
 	if (c in COL_WIDTHS) return COL_WIDTHS[c];
 	if (MONEY_COLS.has(c)) return 132;
@@ -434,6 +444,11 @@ async function itemView(el, params, arg, token) {
 	const eraT = era && dropsTable(era, true), learnedT = learned && dropsTable(learned.drops, false);
 	const fromAH = it.inScan ? it.cur : null;
 	const card = (lbl, val, delta = "") => `<div class="card box"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="delta">${delta}</div></div>`;
+	// daily rows: [day, low, high, available, mean of that day's scans, scans that day]
+	const all = hist.d.map(([d, lo, hi, av, mean, scans]) => ({ d, lo, hi, av: av || 0, mean, scans: scans || 0, price: mean || (lo + hi) / 2 }));
+	// scan rows: [time, lowest, quantity, auctions, median]
+	const scans = hist.s.map(([t, low, qty, n, med]) => ({ t, low, qty, n, med }));
+	const hours = new Set(scans.map(p => new Date(p.t * 1000).getHours()));
 
 	el.innerHTML = `
 		<div class="item-head">
@@ -445,18 +460,19 @@ async function itemView(el, params, arg, token) {
 			</div>
 		</div>
 		<div class="cards" style="margin-bottom:16px">
-			${card("Current Price", money(it.cur), `${pct(it.vs30)} <span class="muted">vs 30d avg</span>`)}
+			${card("Current Price", money(it.cur), `${pct(it.vs30)} <span class="muted">vs 30d avg &middot; ${it.inScan ? "latest scan" : timeAgo(it.curT)}</span>`)}
 			${card("7 Day Average", money(it.a7), `${pct(it.wk)} <span class="muted">7d trend</span>`)}
 			${card("30 Day Average", money(it.a30), `<span class="muted">all-time</span> ${money(it.all)}`)}
 			${card("Lowest Ever", money(it.min), `<span class="muted">highest</span> ${money(it.max)}`)}
-			${card("Available", num(it.av), `<span class="muted">avg</span> ${num(it.avAvg)} <span class="muted">listed</span>`)}
-			${card("Seen", `${it.seen} <span class="muted" style="font-size:13px">days</span>`, ago(it.last))}
+			${card("Available", num(it.av), it.n ? `<span class="muted">in</span> ${num(it.n)} <span class="muted">auctions</span>` : `<span class="muted">avg</span> ${num(it.avAvg)} <span class="muted">listed</span>`)}
+			${card("Seen", `${it.seen} <span class="muted" style="font-size:13px">days</span>`, `${seenAgo(it)}${it.pts ? ` <span class="muted">&middot; ${it.pts} scans</span>` : ""}`)}
 		</div>
 		<div class="item-grid">
 			<div class="stack">
 				<div class="tooltip static">${tt || `<b class="q${it.q}">${esc(it.name)}</b>`}</div>
 				<div class="box"><h3>Price Summary</h3><div class="kv">
 					<span>Current (lowest buyout)</span><span>${money(it.cur)}</span>
+					${it.med != null ? `<span>Median auction (latest scan)</span><span>${money(it.med)}</span>` : ""}
 					<span>Last 3 days avg</span><span>${money(it.a3)}</span>
 					<span>Last 7 days avg</span><span>${money(it.a7)}</span>
 					<span>Last 14 days avg</span><span>${money(it.a14)}</span>
@@ -465,13 +481,15 @@ async function itemView(el, params, arg, token) {
 					<div class="sep"></div>
 					<span>Lowest ever</span><span>${money(it.min)}</span>
 					<span>Highest ever</span><span>${money(it.max)}</span>
-					<span>Day change</span><span>${pct(it.chg)}</span>
+					<span>${it.pts >= 2 ? "Change since previous scan" : "Day change"}</span><span>${pct(it.chg)}</span>
 					<span>7 day trend</span><span>${pct(it.wk)}</span>
 					<span>Volatility</span><span>${it.seen > 1 ? it.vol.toFixed(1) + "%" : "-"}</span>
 					<div class="sep"></div>
 					<span>First seen</span><span>${dayLabel(it.first, true)}</span>
-					<span>Last seen</span><span>${dayLabel(it.last, true)}</span>
+					<span>Last seen</span><span>${it.curT && it.last === D.today ? timeLong(it.curT) : dayLabel(it.last, true)}</span>
 					<span>Days seen</span><span>${it.seen}</span>
+					${it.pts ? `<span>Scans seen in</span><span>${it.pts}</span>` : ""}
+					${it.n != null ? `<span>Auctions (latest scan)</span><span>${num(it.n)}</span>` : ""}
 					<div class="sep"></div>
 					<span>Vendor sells for</span><span>${it.sell ? money(it.sell) : "-"}</span>
 					<span>Vendor buy price</span><span>${it.buy ? money(it.buy) : "-"}</span>
@@ -486,11 +504,12 @@ async function itemView(el, params, arg, token) {
 			<div class="stack">
 				<div class="box">
 					<div class="chart-head"><h3 style="margin:0">Price History</h3>
-						<span class="seg" id="range">${[["7", "7D"], ["14", "14D"], ["30", "30D"], ["90", "90D"], ["0", "All"]].map(([v, l]) => `<button class="btn small" data-r="${v}">${l}</button>`).join("")}</span></div>
+						<span class="seg" id="range">${scans.length >= 2 ? `<button class="btn small" data-r="scans">Per Scan</button>` : ""}${[["7", "7D"], ["14", "14D"], ["30", "30D"], ["90", "90D"], ["0", "All"]].map(([v, l]) => `<button class="btn small" data-r="${v}">${l}</button>`).join("")}</span></div>
 					<div class="chart" id="chart"></div>
-					<div class="legend"><span><i style="background:rgba(255,209,0,.35);height:10px"></i>Lowest to highest minimum that day</span><span><i style="background:#ffd100"></i>Daily price</span><span><i style="background:#69ccf0"></i>30 day average</span><span><i class="bar" style="background:rgba(90,140,255,.45)"></i>Quantity listed</span></div>
+					<div class="legend" id="legend"></div>
 				</div>
-				${hist.length >= 7 ? `<div class="box"><h3>Best Day to Buy and Sell</h3><div class="chart short" id="weekday"></div><p class="note">Average price on each weekday relative to the item's overall average. Lower is a better day to buy, higher a better day to sell.</p></div>` : ""}
+				${hours.size >= 4 ? `<div class="box"><h3>Best Time of Day</h3><div class="chart short" id="hours"></div><p class="note">Average lowest price at each hour of the day (your local time) relative to the item's average, from ${scans.length} scans. Lower is a better time to buy, higher a better time to sell.</p></div>` : ""}
+				${all.length >= 7 ? `<div class="box"><h3>Best Day to Buy and Sell</h3><div class="chart short" id="weekday"></div><p class="note">Average price on each weekday relative to the item's overall average. Lower is a better day to buy, higher a better day to sell.</p></div>` : ""}
 				${eraT || learnedT ? `<div class="box"><h3>Disenchanting</h3>
 					${eraT ? `<div class="kv" style="margin-bottom:8px"><span>Expected value (era table, current prices)</span><span>${money(eraT.now)}</span>
 						<span>Expected value (30 day avg prices)</span><span>${money(eraT.avg)}</span>
@@ -498,54 +517,85 @@ async function itemView(el, params, arg, token) {
 					${learnedT ? `<h3 style="margin-top:14px">Your Disenchants <span class="muted" style="font-size:13px">(${learned.n} ${learned.approx ? "from nearby item levels" : "recorded"})</span></h3>
 						<div class="kv" style="margin-bottom:8px"><span>Expected value from your results</span><span>${money(learnedT.now)}</span></div>${learnedT.html}` : ""}
 				</div>` : ""}
+				${scans.length ? `<div class="box"><h3>Scans</h3><div id="scans"></div></div>` : ""}
 				<div class="box"><h3>Daily History</h3><div id="days"></div></div>
 			</div>
 		</div>`;
 
-	// chart with range buttons
+	// price chart: per scan, or daily with a range
 	const rangeEl = $("#range", el);
-	const all = hist.map(([d, lo, hi, av]) => ({ d, lo, hi, av: av || 0, mid: (lo + hi) / 2 }));
+	const legend = items => items.map(([color, label, bar]) => `<span><i class="${bar ? "bar" : ""}" style="background:${color}"></i>${label}</span>`).join("");
 	function draw(r) {
 		$$("button", rangeEl).forEach(b => b.classList.toggle("on", b.dataset.r === r));
+		if (r === "scans") {
+			chart($("#chart", el), {
+				x: scans.map(p => p.t), unit: 3600, xLabel: timeLabel, xLong: timeLong, labelWidth: 96,
+				series: [
+					{ type: "bar", values: scans.map(p => p.qty), color: "rgba(90,140,255,.38)", axis: "right", name: "Listed", fmt: v => Math.round(v).toLocaleString() },
+					{ type: "line", values: scans.map(p => p.med), color: "#69ccf0", width: 1.5, dash: [5, 4], name: "Median", fmt: moneyText },
+					{ type: "line", values: scans.map(p => p.low), color: "#ffd100", width: 2.5, dots: true, name: "Lowest", fmt: moneyText },
+				],
+				yFmt: moneyText, y2Fmt: v => Math.round(v).toLocaleString(),
+			});
+			$("#legend", el).innerHTML = legend([["#ffd100", "Lowest buyout in the scan"], ["#69ccf0", "Median auction"], ["rgba(90,140,255,.45)", "Quantity listed", true]]);
+			return;
+		}
 		const rows = +r ? all.filter(p => p.d > D.today - +r) : all;
 		const ma = rows.map(p => {
 			const win = all.filter(q => q.d > p.d - 30 && q.d <= p.d);
-			return win.reduce((s, q) => s + q.mid, 0) / win.length;
+			return win.reduce((s, q) => s + q.price, 0) / win.length;
 		});
 		chart($("#chart", el), {
 			x: rows.map(p => p.d),
 			series: [
-				{ type: "band", lo: rows.map(p => p.lo), hi: rows.map(p => p.hi), color: "rgba(255,209,0,.18)", name: "Range", fmt: (i) => `${moneyText(rows[i].lo)} - ${moneyText(rows[i].hi)}` },
+				{ type: "band", lo: rows.map(p => p.lo), hi: rows.map(p => p.hi), color: "rgba(255,209,0,.18)", name: "Range", fmt: i => `${moneyText(rows[i].lo)} - ${moneyText(rows[i].hi)}` },
 				{ type: "bar", values: rows.map(p => p.av), color: "rgba(90,140,255,.38)", axis: "right", name: "Listed", fmt: v => Math.round(v).toLocaleString() },
 				{ type: "line", values: ma, color: "#69ccf0", width: 1.5, dash: [5, 4], name: "30d avg", fmt: moneyText },
-				{ type: "line", values: rows.map(p => p.mid), color: "#ffd100", width: 2.5, dots: true, name: "Price", fmt: moneyText },
+				{ type: "line", values: rows.map(p => p.price), color: "#ffd100", width: 2.5, dots: true, name: "Price", fmt: moneyText },
 			],
 			yFmt: moneyText, y2Fmt: v => Math.round(v).toLocaleString(),
 		});
+		$("#legend", el).innerHTML = legend([["rgba(255,209,0,.35)", "Lowest to highest that day", true], ["#ffd100", "Daily price (average of the day's scans)"], ["#69ccf0", "30 day average"], ["rgba(90,140,255,.45)", "Quantity listed", true]]);
 	}
 	rangeEl.onclick = e => { const b = e.target.closest("[data-r]"); if (b) draw(b.dataset.r); };
-	draw(all.length > 30 ? "30" : "0");
+	draw(scans.length >= 2 ? "scans" : all.length > 30 ? "30" : "0");
 
-	if (hist.length >= 7) {
+	const relBars = (box, labels, rel, name) => chart(box, {
+		labels, x: labels.map((_, i) => i),
+		series: [{ type: "bar", values: rel, color: v => (v < 0 ? "rgba(30,255,0,.55)" : "rgba(255,74,58,.55)"), name, fmt: v => `${v > 0 ? "+" : ""}${v.toFixed(1)}%` }],
+		yFmt: v => `${v > 0 ? "+" : ""}${v.toFixed(0)}%`, zero: true,
+	});
+	if (hours.size >= 4) {
+		const avg = scans.reduce((s, p) => s + p.low, 0) / scans.length;
+		const by = {};
+		for (const p of scans) (by[new Date(p.t * 1000).getHours()] ||= []).push(p.low);
+		const hs = Object.keys(by).map(Number).sort((a, b) => a - b);
+		relBars($("#hours", el), hs.map(h => `${String(h).padStart(2, "0")}:00`), hs.map(h => (by[h].reduce((s, v) => s + v, 0) / by[h].length / avg - 1) * 100), "vs average");
+	}
+	if (all.length >= 7) {
 		const sums = Array(7).fill(0), counts = Array(7).fill(0);
-		const avg = all.reduce((s, p) => s + p.mid, 0) / all.length;
-		for (const p of all) { const w = dayDate(p.d).getDay(); sums[w] += p.mid; counts[w]++; }
+		const avg = all.reduce((s, p) => s + p.price, 0) / all.length;
+		for (const p of all) { const w = dayDate(p.d).getDay(); sums[w] += p.price; counts[w]++; }
 		const order = [1, 2, 3, 4, 5, 6, 0];
 		const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-		chart($("#weekday", el), {
-			labels: order.map(w => names[w]),
-			x: order.map((_, i) => i),
-			series: [{ type: "bar", values: order.map(w => (counts[w] ? (sums[w] / counts[w] / avg - 1) * 100 : 0)), color: v => (v < 0 ? "rgba(30,255,0,.55)" : "rgba(255,74,58,.55)"), name: "vs average", fmt: v => `${v > 0 ? "+" : ""}${v.toFixed(1)}%` }],
-			yFmt: v => `${v > 0 ? "+" : ""}${v.toFixed(0)}%`, zero: true,
-		});
+		relBars($("#weekday", el), order.map(w => names[w]), order.map(w => (counts[w] ? (sums[w] / counts[w] / avg - 1) * 100 : 0)), "vs average");
+	}
+
+	// scans table (newest first)
+	if (scans.length) {
+		const rows = scans.slice().reverse().map((p, i, arr) => {
+			const prev = arr[i + 1];
+			return `<tr><td>${timeLong(p.t)}</td><td class="r">${money(p.low)}</td><td class="r">${money(p.med)}</td><td class="r">${num(p.qty)}</td><td class="r">${num(p.n)}</td><td class="r">${prev ? pct((p.low / prev.low - 1) * 100) : "-"}</td></tr>`;
+		}).join("");
+		$("#scans", el).innerHTML = `<div class="tbl-wrap" style="max-height:360px;overflow:auto"><table class="list"><thead><tr><th class="nosort">Scan</th><th class="r nosort">Lowest</th><th class="r nosort">Median</th><th class="r nosort">Available</th><th class="r nosort">Auctions</th><th class="r nosort">Change</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 	}
 
 	// daily history table (newest first)
 	const dayRows = all.slice().reverse().map((p, i, arr) => {
 		const prev = arr[i + 1];
-		return `<tr><td>${dayLabel(p.d, true)}</td><td class="r">${money(p.lo)}</td><td class="r">${money(p.hi)}</td><td class="r">${p.hi > p.lo ? pct((p.hi / p.lo - 1) * 100) : "-"}</td><td class="r">${num(p.av)}</td><td class="r">${prev ? pct((p.mid / prev.mid - 1) * 100) : "-"}</td></tr>`;
+		return `<tr><td>${dayLabel(p.d, true)}</td><td class="r">${money(p.lo)}</td><td class="r">${money(p.hi)}</td><td class="r">${p.mean ? money(p.mean) : `<span class="muted">-</span>`}</td><td class="r">${p.scans || `<span class="muted">-</span>`}</td><td class="r">${num(p.av)}</td><td class="r">${prev ? pct((p.price / prev.price - 1) * 100) : "-"}</td></tr>`;
 	}).join("");
-	$("#days", el).innerHTML = `<div class="tbl-wrap" style="max-height:420px;overflow:auto"><table class="list"><thead><tr><th class="nosort">Date</th><th class="r nosort">Lowest</th><th class="r nosort">Highest</th><th class="r nosort">Spread</th><th class="r nosort">Available</th><th class="r nosort">Change</th></tr></thead><tbody>${dayRows}</tbody></table></div>`;
+	$("#days", el).innerHTML = `<div class="tbl-wrap" style="max-height:420px;overflow:auto"><table class="list"><thead><tr><th class="nosort">Date</th><th class="r nosort">Lowest</th><th class="r nosort">Highest</th><th class="r nosort" title="Average lowest price over that day's scans">Scan Avg</th><th class="r nosort">Scans</th><th class="r nosort">Available</th><th class="r nosort">Change</th></tr></thead><tbody>${dayRows}</tbody></table></div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -557,32 +607,41 @@ async function market(el, params, arg, token) {
 	const M = S.market[S.realm.slug] || (S.market[S.realm.slug] = await getJSON(`${S.realm.slug}/market.json`));
 	if (token !== routeToken) return;
 	const days = M.days.map(([d, items, listings, value, index, classes]) => ({ d, items, listings, value, index, classes }));
-	const last = days[days.length - 1] || {}, prev = days[days.length - 2];
+	const scans = (M.scans || []).map(([t, items, listings, auctions, value, index]) => ({ t, items, listings, auctions, value, index }));
+	const lastDay = days[days.length - 1] || {};
+	// headline numbers: the latest full scan against the one before it, or days without scan data
+	const useScans = scans.length > 0;
+	const last = useScans ? scans[scans.length - 1] : lastDay;
+	const prev = useScans ? scans[scans.length - 2] : days[days.length - 2];
 	const now = D.list.filter(it => it.inScan);
 	const fresh = now.filter(it => it.first === D.today && it.seen === 1);
 	const gone = D.list.filter(it => it.last < D.today && it.last >= D.today - 3 && it.seen >= 2);
 	const card = (lbl, val, delta = "") => `<div class="card box"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="delta">${delta}</div></div>`;
-	const change = (a, b) => (b ? pct((a / b - 1) * 100) + ` <span class="muted">vs previous day</span>` : "");
+	const vs = useScans ? "vs previous scan" : "vs previous day";
+	const change = (a, b) => (b ? pct((a / b - 1) * 100) + ` <span class="muted">${vs}</span>` : "");
 
-	const clsRows = Object.entries(last.classes || {}).map(([c, [qty, val]]) => ({ c: +c, qty, val })).sort((a, b) => b.val - a.val);
+	const clsRows = Object.entries(lastDay.classes || {}).map(([c, [qty, val]]) => ({ c: +c, qty, val })).sort((a, b) => b.val - a.val);
 	const totalVal = clsRows.reduce((s, r) => s + r.val, 0) || 1;
 
 	el.innerHTML = `
 		<div class="cards" style="margin-bottom:16px">
 			${card("Items on the AH", num(last.items), change(last.items, prev?.items))}
 			${card("Total Listings", num(last.listings), change(last.listings, prev?.listings))}
+			${useScans ? card("Auctions", num(last.auctions), change(last.auctions, prev?.auctions)) : ""}
 			${card("Market Value", money(last.value), change(last.value, prev?.value))}
 			${card("Price Index", last.index != null ? last.index.toFixed(1) : "-", prev?.index != null ? `${pct(last.index - prev.index)} <span class="muted">points</span>` : "")}
-			${card("Items Tracked", num(D.list.length), `${S.realm.days} days of history`)}
+			${card("Items Tracked", num(D.list.length), `${S.realm.days} days${useScans ? `, ${scans.length} scans` : ""} of history`)}
 			${card("New Today", num(fresh.length), `${num(gone.length)} <span class="muted">gone recently</span>`)}
 		</div>
+		${scans.length >= 2 ? `<div class="toolbar"><span class="seg" id="mrange"><button class="btn small" data-r="scans">Per Scan</button><button class="btn small" data-r="days">Daily</button></span></div>` : ""}
 		<div class="grid2" style="margin-bottom:14px">
-			<div class="box"><h3>Market Value</h3><div class="chart short" id="c-value"></div><p class="note">Sum of lowest buyout times quantity for every item seen that day.</p></div>
-			<div class="box"><h3>Price Index</h3><div class="chart short" id="c-index"></div><p class="note">Median of every item's price relative to its own average. 100 = normal, above = expensive day.</p></div>
+			<div class="box"><h3>Market Value</h3><div class="chart short" id="c-value"></div><p class="note">Sum of lowest buyout times quantity for every item on the auction house.</p></div>
+			<div class="box"><h3>Price Index</h3><div class="chart short" id="c-index"></div><p class="note">Median of every item's price relative to its own average. 100 = normal, above = expensive.</p></div>
 			<div class="box"><h3>Listings</h3><div class="chart short" id="c-listings"></div></div>
 			<div class="box"><h3>Distinct Items</h3><div class="chart short" id="c-items"></div></div>
 		</div>
-		<div class="box" style="margin-bottom:14px"><h3>Categories (latest scan)</h3><table class="list"><thead><tr><th class="nosort">Category</th><th class="r nosort">Listings</th><th class="r nosort">Value</th><th class="nosort">Share</th></tr></thead><tbody>
+		${useScans ? `<div class="box" style="margin-bottom:14px"><h3>Recent Scans</h3><div id="scans"></div></div>` : ""}
+		<div class="box" style="margin-bottom:14px"><h3>Categories (today)</h3><table class="list"><thead><tr><th class="nosort">Category</th><th class="r nosort">Listings</th><th class="r nosort">Value</th><th class="nosort">Share</th></tr></thead><tbody>
 			${clsRows.map(r => `<tr data-c="${r.c}"><td><a href="${href("browse", null, new URLSearchParams({ c: r.c }))}">${esc(S.items.classes[r.c] || "Unknown")}</a></td><td class="r">${num(r.qty)}</td><td class="r">${money(r.val)}</td><td class="bar-cell"><span class="b" style="width:${(r.val / totalVal * 100).toFixed(1)}%"></span><span>${(r.val / totalVal * 100).toFixed(1)}%</span></td></tr>`).join("")}
 		</tbody></table></div>
 		<div class="grid2">
@@ -596,12 +655,28 @@ async function market(el, params, arg, token) {
 			<div class="box"><h3>Gone from the Market</h3><div id="l-gone"></div></div>
 		</div>`;
 
-	const x = days.map(p => p.d);
-	const line = (id, values, color, fmt) => chart($(id, el), { x, series: [{ type: "line", values, color, width: 2.5, dots: true, fill: true, name: "", fmt }], yFmt: fmt });
-	line("#c-value", days.map(p => p.value), "#ffd100", moneyText);
-	line("#c-index", days.map(p => p.index), "#69ccf0", v => v?.toFixed(1));
-	line("#c-listings", days.map(p => p.listings), "#a335ee", v => Math.round(v).toLocaleString());
-	line("#c-items", days.map(p => p.items), "#1eff00", v => Math.round(v).toLocaleString());
+	function drawCharts(mode) {
+		$$("#mrange button", el).forEach(b => b.classList.toggle("on", b.dataset.r === mode));
+		const perScan = mode === "scans";
+		const pts = perScan ? scans : days;
+		const axis = perScan ? { x: scans.map(p => p.t), unit: 3600, xLabel: timeLabel, xLong: timeLong, labelWidth: 96 } : { x: days.map(p => p.d) };
+		const line = (id, values, color, fmt) => chart($(id, el), { ...axis, series: [{ type: "line", values, color, width: 2.5, dots: true, fill: true, name: "", fmt }], yFmt: fmt });
+		line("#c-value", pts.map(p => p.value), "#ffd100", moneyText);
+		line("#c-index", pts.map(p => p.index), "#69ccf0", v => v?.toFixed(1));
+		line("#c-listings", pts.map(p => p.listings), "#a335ee", v => Math.round(v).toLocaleString());
+		line("#c-items", pts.map(p => p.items), "#1eff00", v => Math.round(v).toLocaleString());
+	}
+	const mrange = $("#mrange", el);
+	if (mrange) mrange.onclick = e => { const b = e.target.closest("[data-r]"); if (b) drawCharts(b.dataset.r); };
+	drawCharts(scans.length >= 2 ? "scans" : "days");
+
+	if (useScans) {
+		const rows = scans.slice().reverse().slice(0, 50).map((p, i, arr) => {
+			const prev = arr[i + 1];
+			return `<tr><td>${timeLong(p.t)}</td><td class="r">${num(p.items)}</td><td class="r">${num(p.listings)}</td><td class="r">${num(p.auctions)}</td><td class="r">${money(p.value)}</td><td class="r">${p.index != null ? p.index.toFixed(1) : "-"}</td><td class="r">${prev ? pct((p.value / prev.value - 1) * 100) : "-"}</td></tr>`;
+		}).join("");
+		$("#scans", el).innerHTML = `<div class="tbl-wrap" style="max-height:360px;overflow:auto"><table class="list"><thead><tr><th class="nosort">Scan</th><th class="r nosort">Items</th><th class="r nosort">Listings</th><th class="r nosort">Auctions</th><th class="r nosort">Market Value</th><th class="r nosort">Price Index</th><th class="r nosort">Value Change</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+	}
 
 	const movers = now.filter(it => it.wk != null && it.seen >= 3 && it.a7 >= 100);
 	const top = (id, key, data, cols, sort, dir = -1) => list($(id, el), "m:" + key + S.realm.slug, data, cols, { sort, dir, pageSize: 10 });
@@ -792,9 +867,15 @@ function chart(box, cfg) {
 		const [y0, y1] = range(left), [r0, r1] = range(right);
 		const pl = 62, pr = right.length ? 52 : 14, pt = 10, pb = 24;
 		const cw = W - pl - pr, ch = H - pt - pb;
+		// x values are days by default; cfg.unit is the width of one x step (e.g. 3600 for timestamps)
+		const unit = cfg.unit || 1;
 		const xmin = cfg.x[0], xmax = cfg.x[n - 1];
-		const step = n > 1 ? cw / (xmax - xmin + 1) : cw;
-		const X = i => pl + (n > 1 ? ((cfg.x[i] - xmin) + 0.5) * step : cw / 2);
+		const step = n > 1 ? cw / (xmax - xmin + unit) : cw;
+		const X = i => pl + (n > 1 ? ((cfg.x[i] - xmin) + unit / 2) * step : cw / 2);
+		let gap = unit;
+		for (let i = 1; i < n; i++) gap = Math.min(gap, cfg.x[i] - cfg.x[i - 1] || gap);
+		const xLabel = i => (cfg.labels ? cfg.labels[i] : (cfg.xLabel || dayLabel)(cfg.x[i]));
+		const xLong = i => (cfg.labels ? cfg.labels[i] : cfg.xLong ? cfg.xLong(cfg.x[i]) : dayLabel(cfg.x[i], true));
 		const Y = v => pt + ch - ((v - y0) / (y1 - y0)) * ch;
 		const Y2 = v => pt + ch - ((v - r0) / (r1 - r0)) * ch;
 		// grid
@@ -806,14 +887,19 @@ function chart(box, cfg) {
 			if (right.length) { g.textAlign = "left"; g.fillText(cfg.y2Fmt ? cfg.y2Fmt(r0 + (r1 - r0) * k / 4) : "", W - pr + 6, y + 4); }
 		}
 		g.textAlign = "center";
-		const every = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(cw / 64))));
-		for (let i = 0; i < n; i += every) g.fillText(cfg.labels ? cfg.labels[i] : dayLabel(cfg.x[i]), X(i), H - 6);
+		// skip labels that would overlap the previous one (points can be unevenly spaced)
+		const lw = cfg.labelWidth || 64;
+		for (let i = 0, lastX = -Infinity; i < n; i++) {
+			if (X(i) - lastX < lw || X(i) + lw / 2 > W) continue;
+			g.fillText(xLabel(i), X(i), H - 6);
+			lastX = X(i);
+		}
 		if (cfg.zero && y0 < 0) { g.strokeStyle = "rgba(255,255,255,.25)"; g.beginPath(); g.moveTo(pl, Y(0)); g.lineTo(W - pr, Y(0)); g.stroke(); }
 		// series
 		for (const s of cfg.series) {
 			const Ys = s.axis === "right" ? Y2 : Y;
 			if (s.type === "bar") {
-				const bw = Math.max(2, Math.min(40, step * 0.6));
+				const bw = Math.max(2, Math.min(40, gap * step * 0.6));
 				s.values.forEach((v, i) => {
 					if (v == null) return;
 					g.fillStyle = typeof s.color === "function" ? s.color(v) : s.color;
@@ -847,7 +933,7 @@ function chart(box, cfg) {
 		const i = state.hover;
 		if (i >= 0 && i < n) {
 			g.strokeStyle = "rgba(255,255,255,.35)"; g.beginPath(); g.moveTo(Math.round(X(i)) + 0.5, pt); g.lineTo(Math.round(X(i)) + 0.5, pt + ch); g.stroke();
-			const lines = [cfg.labels ? cfg.labels[i] : dayLabel(cfg.x[i], true), ...cfg.series.filter(s => s.name !== undefined).map(s => {
+			const lines = [xLong(i), ...cfg.series.filter(s => s.name !== undefined).map(s => {
 				const v = s.type === "band" ? s.fmt(i) : s.fmt(s.values[i]);
 				return [s.name, v, typeof s.color === "function" ? s.color(s.values[i]) : s.color];
 			})];
