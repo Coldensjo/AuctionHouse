@@ -63,7 +63,7 @@ function itemMeta(id) {
 }
 
 const shardOf = id => id % S.meta.shards;
-async function history(id) {
+async function itemHistory(id) {
 	const key = `${S.realm.slug}/${shardOf(id)}`;
 	if (!S.hist[key]) S.hist[key] = await load("h:" + key, () => getJSON(`${S.realm.slug}/h/${shardOf(id)}.json`));
 	return S.hist[key][id] || [];
@@ -129,7 +129,7 @@ const subName = it => S.items.subclasses[`${it.c}:${it.s}`] || "";
 function parseHash() {
 	const [path, qs] = location.hash.replace(/^#\/?/, "").split("?");
 	const segs = path.split("/").filter(Boolean).map(decodeURIComponent);
-	let realm = S.meta.realms[0];
+	let realm = S.meta.realms.reduce((a, b) => (b.lastScan > a.lastScan ? b : a)); // most recently scanned
 	const r = S.meta.realms.find(x => x.slug === segs[0]);
 	if (r) { realm = r; segs.shift(); }
 	return { realm, view: segs[0] || "browse", arg: segs[1], params: new URLSearchParams(qs || "") };
@@ -324,7 +324,11 @@ async function browse(el, params) {
 		timer = setTimeout(() => { st.page = 0; sync(); apply(); }, 120);
 	};
 	form.onsubmit = e => e.preventDefault();
-	$("#reset", el).onclick = () => { location.hash = href("browse"); };
+	$("#reset", el).onclick = () => {
+		delete S.lists.browse;
+		history.replaceState(null, "", href("browse"));
+		route();
+	};
 	$("#cats", el).onclick = e => {
 		const a = e.target.closest("a[data-c]");
 		if (!a) return;
@@ -392,7 +396,7 @@ async function itemView(el, params, arg, token) {
 	const id = +arg;
 	const D = S.data[S.realm.slug];
 	const it = D.byId.get(id) || { id, ...itemMeta(id), missing: true };
-	const [hist, tt] = await Promise.all([history(id), tooltipHtml(id), load("de", async () => (S.de = await getJSON("disenchant.json"))), loadPosting()]);
+	const [hist, tt] = await Promise.all([itemHistory(id), tooltipHtml(id), load("de", async () => (S.de = await getJSON("disenchant.json"))), loadPosting()]);
 	if (token !== routeToken) return;
 	const posts = (S.posting[id] || []).slice().reverse();
 	const sub = [it.ilvl ? `Item Level ${it.ilvl}` : "", it.req ? `Requires Level ${it.req}` : "", [className(it), subName(it)].filter(Boolean).join(" &rsaquo; "), S.items.slots[it.slot] || ""].filter(Boolean).join(" &middot; ");
@@ -699,7 +703,7 @@ function chart(box, cfg) {
 		cv.width = W * dpr; cv.height = H * dpr;
 		const g = cv.getContext("2d");
 		g.setTransform(dpr, 0, 0, dpr, 0, 0);
-		g.font = "11px Marcellus, Georgia, serif";
+		g.font = "11px 'Friz Quadrata', Georgia, serif";
 		const n = cfg.x.length;
 		if (!n) { g.fillStyle = "#a59c86"; g.fillText("No data yet", W / 2 - 30, H / 2); return; }
 		const left = cfg.series.filter(s => s.axis !== "right");
@@ -775,7 +779,7 @@ function chart(box, cfg) {
 				const v = s.type === "band" ? s.fmt(i) : s.fmt(s.values[i]);
 				return [s.name, v, typeof s.color === "function" ? s.color(s.values[i]) : s.color];
 			})];
-			g.font = "12px Marcellus, Georgia, serif";
+			g.font = "12px 'Friz Quadrata', Georgia, serif";
 			const tw = Math.max(...lines.map(l => (typeof l === "string" ? g.measureText(l).width : g.measureText(l[0] + "  " + l[1]).width + 16))) + 20;
 			const th = lines.length * 17 + 10;
 			let tx = X(i) + 12; if (tx + tw > W) tx = X(i) - tw - 12;

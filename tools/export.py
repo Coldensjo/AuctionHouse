@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
 	"site_title": "Auction House",
 	"realm_aliases": {},
 	"hide_realms": [],
+	"realm_order": ["PvE", "PvP", "RP", "Hardcore"],
 	"push": True,
 }
 
@@ -309,7 +310,18 @@ def export(cfg, fetch=True):
 
 	buckets = read_disenchant_buckets(cfg)
 	realms = [build_realm(n, a, items, buckets) for n, a in archives.items()]
-	realms.sort(key=lambda r: -r["lastScan"])
+	order = [n.lower() for n in cfg.get("realm_order") or []]
+	realms.sort(key=lambda r: (order.index(r["name"].lower()) if r["name"].lower() in order else len(order), r["name"]))
+
+	# Remove site data and archives of realms that are no longer exported (hidden or renamed).
+	keep = {r["slug"] for r in realms}
+	for entry in os.listdir(DATA):
+		if os.path.isdir(os.path.join(DATA, entry)) and entry not in ("tt",) and entry not in keep:
+			shutil.rmtree(os.path.join(DATA, entry))
+	for h in hidden:
+		path = os.path.join(ARCHIVE, slug(h) + ".json")
+		if os.path.exists(path):
+			os.remove(path)
 
 	# Item list for the site: compact rows plus lookup tables for class/subclass/slot names.
 	classes, subclasses, slots = {}, {}, {}
