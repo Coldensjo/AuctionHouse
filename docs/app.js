@@ -83,10 +83,15 @@ function money(c, cls = "") {
 	const neg = c < 0;
 	c = Math.round(Math.abs(c));
 	const g = Math.floor(c / 10000), s = Math.floor((c % 10000) / 100), k = c % 100;
+	if (g >= 100000) { // joke listings (millions of gold): shorten so the column keeps its width
+		const short = g >= 1e6 ? (g / 1e6).toFixed(g >= 1e7 ? 0 : 1) + "M" : Math.round(g / 1000) + "k";
+		return `<span class="money ${neg ? "neg" : ""} ${cls}" title="${g.toLocaleString()} gold">${neg ? "-" : ""}${short}<i class="g"></i></span>`;
+	}
 	let h = "";
 	if (g) h += `${g.toLocaleString()}<i class="g"></i>`;
-	if (s || (g && k)) h += `${g ? String(s).padStart(2, "0") : s}<i class="s"></i>`;
-	if (k || !h) h += `${(g || s) ? String(k).padStart(2, "0") : k}<i class="c"></i>`;
+	// From 1,000g copper is left out and from 10,000g silver too: small change at that size, and it keeps columns narrow.
+	if (g < 10000 && (s || (g && k && g < 1000))) h += `${g ? String(s).padStart(2, "0") : s}<i class="s"></i>`;
+	if (g < 1000 && (k || !h)) h += `${(g || s) ? String(k).padStart(2, "0") : k}<i class="c"></i>`;
 	return `<span class="money ${neg ? "neg" : ""} ${cls}">${neg ? "-" : ""}${h}</span>`;
 }
 function moneyText(c) {
@@ -118,7 +123,7 @@ function timeAgo(ts) {
 	return `${Math.round(s / 86400)} days ago`;
 }
 const icon = (it, size = "") => `<span class="ic ${size} q${it.q}"><img loading="lazy" src="icons/${esc(it.icon)}.jpg" alt="" onerror="this.onerror=null;this.src='icons/inv_misc_questionmark.jpg'"></span>`;
-const itemLink = (it, size = "") => `<a class="iname q${it.q}" href="${href("item", it.id)}" data-tip="${it.id}">${icon(it, size)} ${esc(it.name)}</a>`;
+const itemLink = (it, size = "") => `<a class="iname q${it.q}" href="${href("item", it.id)}" data-tip="${it.id}">${icon(it, size)}<span class="nm">${esc(it.name)}</span></a>`;
 const className = it => (S.items.classes[it.c] || "Unknown");
 const subName = it => S.items.subclasses[`${it.c}:${it.s}`] || "";
 
@@ -195,6 +200,17 @@ const COLS = {
 	gain: { label: "Potential", title: "30 day average minus current price", sort: it => it.a30 - it.cur, cls: "r", fmt: it => money(it.a30 - it.cur) },
 };
 
+// Fixed column widths, so sorting or a very long price never shifts the columns. The item column takes the rest.
+const MONEY_COLS = new Set(["cur", "a7", "a30", "all", "min", "max", "de", "deProfit", "sell", "flip", "value", "gain", "vprice", "vdiff", "buy", "price", "total"]);
+const PCT_COLS = new Set(["vs30", "wk", "chg", "discount", "vmargin", "markup", "vsnow"]);
+const COL_WIDTHS = { item: 0, req: 44, ilvl: 50, av: 64, seen: 56, last: 96, vol: 84, prof: 116, npcs: 270, posted: 176, qty: 52 };
+function colWidth(c) {
+	if (c in COL_WIDTHS) return COL_WIDTHS[c];
+	if (MONEY_COLS.has(c)) return 132;
+	if (PCT_COLS.has(c)) return 78;
+	return 110;
+}
+
 function list(el, key, data, cols, opts = {}) {
 	const st = S.lists[key] || (S.lists[key] = { sort: opts.sort || cols[0], dir: opts.dir ?? -1, page: 0 });
 	if (opts.resetPage) st.page = 0;
@@ -210,6 +226,9 @@ function list(el, key, data, cols, opts = {}) {
 	const pages = Math.max(1, Math.ceil(sorted.length / size));
 	st.page = Math.min(st.page, pages - 1);
 	const rows = sorted.slice(st.page * size, st.page * size + size);
+	const widths = cols.map(colWidth);
+	const colgroup = `<colgroup>${widths.map(w => `<col${w ? ` style="width:${w}px"` : ""}>`).join("")}</colgroup>`;
+	const minWidth = widths.reduce((a, w) => a + (w || 180), 0);
 	const head = cols.map(c => {
 		const d = COLS[c];
 		const cls = [d.cls === "r" ? "r" : "", c === st.sort ? "sorted" : "", c === st.sort && st.dir > 0 ? "asc" : ""].join(" ");
@@ -222,7 +241,7 @@ function list(el, key, data, cols, opts = {}) {
 		<span class="seg"><button class="btn small" data-page="-1" ${st.page ? "" : "disabled"}>&lt; Prev</button>
 		<span style="padding:0 8px">Page ${st.page + 1} of ${pages}</span>
 		<button class="btn small" data-page="1" ${st.page < pages - 1 ? "" : "disabled"}>Next &gt;</button></span></div>`;
-	el.innerHTML = `<div class="tbl-wrap"><table class="list"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>${pager}`;
+	el.innerHTML = `<div class="tbl-wrap"><table class="list fixed" style="min-width:${minWidth}px">${colgroup}<thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>${pager}`;
 	el.onclick = e => {
 		const th = e.target.closest("th[data-sort]");
 		if (th) {
@@ -633,7 +652,7 @@ async function disenchant(el, params, arg, token) {
 	const mats = S.de.materials.map(id => D.byId.get(id) || { id, ...itemMeta(id), cur: null });
 	el.innerHTML = `<h2>Disenchanting</h2>
 		<p class="note" style="margin-bottom:12px">Uncommon, rare and epic armor and weapons on the auction house that are worth more disenchanted than their buyout. Values use the Classic Era disenchant tables and current material prices.</p>
-		<div class="grid2" style="grid-template-columns:3fr 2fr">
+		<div class="grid2" style="grid-template-columns:minmax(0, 3fr) minmax(0, 2fr)">
 			<div class="box"><h3>Opportunities</h3><div class="toolbar"></div><div id="res"></div></div>
 			<div class="stack">
 				<div class="box"><h3>Enchanting Materials</h3><div id="mats"></div></div>
