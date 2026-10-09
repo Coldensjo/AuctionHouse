@@ -264,6 +264,7 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .pill.ally, .ally { color: #4a9eff; }
 .pill.horde, .horde { color: #ff4a3a; }
 .pill.limited { color: var(--q5); }
+.pill.troll { color: var(--down); cursor: help; }
 .vendor { padding: 6px 0; border-bottom: 1px solid rgba(232, 204, 122, .12); font-size: 13.5px; }
 .vendor:last-child { border-bottom: none; }
 .vendor .money { margin-left: 10px; }

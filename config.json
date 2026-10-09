@@ -15,5 +15,14 @@
 	],
 	"scan_history_days": 45,
 	"site_title": "Auction House",
+	"troll_filter": {
+		"extreme_factor": 100,
+		"item_max_gold": {},
+		"max_price_gold": 5000,
+		"spike_factor": 20,
+		"spike_max_quantity": 5,
+		"trash_min_gold": 10,
+		"trash_vendor_multiple": 200
+	},
 	"wow_path": "C:/Program Files (x86)/World of Warcraft/_classic_beta_"
 }

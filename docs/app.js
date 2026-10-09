@@ -123,6 +123,8 @@ function seenAgo(it) {
 	if (it.inScan) return `<span class="up">Latest scan</span>`;
 	return it.last === S.data[S.realm.slug].today && it.curT ? timeAgo(it.curT) : ago(it.last);
 }
+// The current cheapest listing is a joke price (left out of all statistics)
+const trollTag = it => `<span class="pill troll" title="Only a joke listing at ${esc(moneyText(it.troll))} each. Left out of all prices and statistics.">Troll</span>`;
 const timeLabel = t => new Date(t * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 const timeLong = t => new Date(t * 1000).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 function timeAgo(ts) {
@@ -188,7 +190,7 @@ const COLS = {
 	req: { label: "Lvl", sort: it => it.req, cls: "r", fmt: it => it.req || "" },
 	ilvl: { label: "iLvl", sort: it => it.ilvl, cls: "r", fmt: it => it.ilvl || "" },
 	av: { label: "Avail", title: "Quantity listed in the latest scan it was seen in", sort: it => it.av, cls: "r", fmt: it => num(it.av) },
-	cur: { label: "Price", title: "Lowest buyout in the most recent scan", sort: it => it.cur, cls: "r", fmt: it => money(it.cur) },
+	cur: { label: "Price", title: "Lowest buyout in the most recent scan", sort: it => it.cur, cls: "r", fmt: it => (it.troll ? trollTag(it) : money(it.cur)) },
 	a7: { label: "7d Avg", sort: it => it.a7, cls: "r", fmt: it => money(it.a7) },
 	a30: { label: "30d Avg", sort: it => it.a30, cls: "r", fmt: it => money(it.a30) },
 	all: { label: "All-time Avg", sort: it => it.all, cls: "r", fmt: it => money(it.all) },
@@ -460,7 +462,9 @@ async function itemView(el, params, arg, token) {
 			</div>
 		</div>
 		<div class="cards" style="margin-bottom:16px">
-			${card("Current Price", money(it.cur), `${pct(it.vs30)} <span class="muted">vs 30d avg &middot; ${it.inScan ? "latest scan" : timeAgo(it.curT)}</span>`)}
+			${it.troll
+				? card("Current Price", `<span class="down" style="font-size:16px">Joke listing</span>`, `${money(it.troll)} <span class="muted">each, ignored</span>`)
+				: card("Current Price", money(it.cur), `${pct(it.vs30)} <span class="muted">vs 30d avg &middot; ${it.inScan ? "latest scan" : timeAgo(it.curT)}</span>`)}
 			${card("7 Day Average", money(it.a7), `${pct(it.wk)} <span class="muted">7d trend</span>`)}
 			${card("30 Day Average", money(it.a30), `<span class="muted">all-time</span> ${money(it.all)}`)}
 			${card("Lowest Ever", money(it.min), `<span class="muted">highest</span> ${money(it.max)}`)}
@@ -517,6 +521,11 @@ async function itemView(el, params, arg, token) {
 					${learnedT ? `<h3 style="margin-top:14px">Your Disenchants <span class="muted" style="font-size:13px">(${learned.n} ${learned.approx ? "from nearby item levels" : "recorded"})</span></h3>
 						<div class="kv" style="margin-bottom:8px"><span>Expected value from your results</span><span>${money(learnedT.now)}</span></div>${learnedT.html}` : ""}
 				</div>` : ""}
+				${hist.x?.length ? `<div class="box"><h3>Ignored Joke Prices</h3>
+					<p class="note" style="margin:0 0 8px">These listings look like trolling (an item put up for far more than it is worth) and are left out of every price, average and chart on this site.</p>
+					<table class="list"><thead><tr><th class="nosort">When</th><th class="r nosort">Price</th><th class="nosort">Why</th></tr></thead><tbody>
+					${hist.x.slice().reverse().map(([when, price, why]) => `<tr><td>${when > 1e6 ? timeLong(when) : dayLabel(when, true)}</td><td class="r">${money(price)}</td><td>${esc(why)}</td></tr>`).join("")}
+					</tbody></table></div>` : ""}
 				${scans.length ? `<div class="box"><h3>Scans</h3><div id="scans"></div></div>` : ""}
 				<div class="box"><h3>Daily History</h3><div id="days"></div></div>
 			</div>
@@ -984,8 +993,8 @@ function placeTip(e) {
 async function showTip(id, e) {
 	tipId = id;
 	const it = S.data[S.realm.slug]?.byId.get(id) || { id, ...itemMeta(id) };
-	const lines = it.cur != null ? `<div class="price-lines">
-		<div class="pl">Auction${it.inScan ? "" : ` <span class="muted">(${S.data[S.realm.slug].today - it.last}d old)</span>`}<span>${money(it.cur)}</span></div>
+	const lines = it.cur != null || it.troll ? `<div class="price-lines">
+		<div class="pl">Auction${it.inScan ? "" : ` <span class="muted">(${S.data[S.realm.slug].today - it.last}d old)</span>`}<span>${it.troll ? `<span class="down">joke listing</span>` : money(it.cur)}</span></div>
 		${it.a30 ? `<div class="pl">30 day avg<span>${money(it.a30)}</span></div>` : ""}
 		${it.de ? `<div class="pl">Disenchant<span>${money(it.de)}</span></div>` : ""}
 		${it.sell ? `<div class="pl">Vendor<span>${money(it.sell)}</span></div>` : ""}

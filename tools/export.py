@@ -37,6 +37,16 @@ DEFAULT_CONFIG = {
 	"realm_order": ["PvE", "PvP", "RP", "Hardcore"],
 	"scan_history_days": 45,
 	"check_interval_seconds": 10,
+	# Joke listings (an item worth nothing put up for millions) are left out of all statistics.
+	"troll_filter": {
+		"max_price_gold": 5000, # no real listing costs more than this per item
+		"spike_factor": 20, # ...or more than this many times the item's usual price,
+		"spike_max_quantity": 5, # when no more than this many are listed (big real supply is never ignored)
+		"extreme_factor": 100, # this many times the usual price is ignored whatever the quantity
+		"trash_min_gold": 10, # grey items listed for at least this much
+		"trash_vendor_multiple": 200, # ...and this many times their vendor price
+		"item_max_gold": {}, # per item ID, e.g. {"19019": 2000}: anything above is ignored
+	},
 	"push": True,
 }
 
@@ -243,7 +253,7 @@ def item_stats(entry, today, points):
 		return round(sum(vals) / len(vals)) if vals else None
 
 	prices = [p for _, p in daily]
-	cur = entry["m"]
+	cur = entry["m"] or None # 0: the current listing is a joke
 	latest = points[-1] if points and points[-1][0] == entry.get("mt") else None
 	if len(points) >= 2:
 		chg = pct(points[-1][1], points[-2][1]) # since the previous scan it was in
@@ -273,7 +283,89 @@ def item_stats(entry, today, points):
 		"last": days[-1][0],
 	}
 
-def build_realm(realm, items, buckets, auctionator_scan):
+# ---------------------------------------------------------------------------
+# Troll filter: joke listings are kept in the archive but left out of every statistic
+# ---------------------------------------------------------------------------
+
+def troll_settings(cfg):
+	t = dict(DEFAULT_CONFIG["troll_filter"])
+	t.update(cfg.get("troll_filter") or {})
+	return t
+
+def clean_item(item_id, entry, points, meta, tcfg):
+	"""Removes joke prices from one item's history.
+	Returns (entry with cleaned daily rows, cleaned scan points, ignored [[time|day, price, reason]], troll price of the current listing or None).
+	A price is a joke when it is above the price ceiling, a grey item far above its vendor price, or a spike far above
+	the item's usual price (the lower median of all its prices) while only a few are listed, or extremely far above it."""
+	ceiling = (tcfg["item_max_gold"].get(str(item_id)) or tcfg["max_price_gold"]) * 10000
+	sell, quality = meta.get("sell") or 0, meta.get("q", 1)
+
+	def absolute(p):
+		if p > ceiling:
+			return f"above {ceiling // 10000:,}g"
+		if quality == 0 and p >= max(tcfg["trash_min_gold"] * 10000, tcfg["trash_vendor_multiple"] * sell):
+			return "grey item far above its vendor price"
+		return None
+
+	usual = [v[0] for v in entry["d"].values() if not absolute(v[0])] + [p[1] for p in points if not absolute(p[1])]
+	ref = statistics.median_low(usual) if len(usual) >= 2 else None
+
+	def joke(p, qty):
+		reason = absolute(p)
+		if not reason and ref and p > tcfg["spike_factor"] * ref and (
+				qty is None or qty <= tcfg["spike_max_quantity"] or p >= tcfg["extreme_factor"] * ref):
+			reason = f"{p / ref:,.0f}x its usual price"
+		return reason
+
+	ignored, clean_points, by_day, troll_days = [], [], {}, set()
+	for t, low, qty, n, med in points:
+		reason = joke(low, qty)
+		if reason:
+			ignored.append([t, low, reason])
+			troll_days.add(scan_day(t))
+			continue
+		if med and joke(med, qty):
+			med = None
+		clean_points.append((t, low, qty, n, med))
+		by_day.setdefault(scan_day(t), []).append(low)
+
+	days = {}
+	for d, v in entry["d"].items():
+		day = int(d)
+		low, high, scans = v[0], v[1], by_day.get(day)
+		if joke(low, v[2]):
+			if not scans: # nothing but joke listings that day
+				if day not in troll_days:
+					ignored.append([day, v[0], joke(low, v[2])])
+				continue
+			low = min(scans)
+		if joke(high, v[2]):
+			high = max(scans) if scans else low
+		high = max(high, low)
+		mean = statistics.mean(scans) if scans else (v[3] if len(v) > 3 and v[3] and not joke(v[3], None) else None)
+		count = len(scans) if scans else (v[4] if len(v) > 4 else 0)
+		days[d] = [low, high, v[2], round(mean) if mean else None, count]
+
+	# the current listing, with the quantity it was listed in (a big real supply is never a joke)
+	latest = points[-1] if points and points[-1][0] == entry.get("mt") else None
+	cur_qty = latest[2] if latest else (entry["d"].get(str(entry["md"])) or [0, 0, None])[2]
+	troll = entry["m"] if entry["m"] and joke(entry["m"], cur_qty) else None
+	clean = {"m": 0 if troll else entry["m"], "md": entry["md"], "d": days}
+	if entry.get("mt"):
+		clean["mt"] = entry["mt"]
+	return clean, clean_points, ignored, troll
+
+def blank_stats(entry):
+	"""Stats for an item whose every listing was a joke: seen on the AH, but no real price."""
+	days = sorted((int(d), v) for d, v in entry["d"].items())
+	return {
+		"cur": None, "curDay": entry["md"], "curT": entry.get("mt") or int(SCAN_DAY_0 + entry["md"] * 86400 + 43200),
+		"a3": None, "a7": None, "a14": None, "a30": None, "all": None, "min": None, "max": None,
+		"chg": None, "wk": None, "vs30": None, "vol": 0, "av": days[-1][1][2] or 0, "avAvg": 0,
+		"n": None, "med": None, "pts": 0,
+	}
+
+def build_realm(realm, items, buckets, auctionator_scan, tcfg):
 	"""Writes site/data/<realm>/ and returns the realm summary for realms.json."""
 	arc = realm.items
 	today = max((e["md"] for e in arc.values()), default=0)
@@ -289,10 +381,23 @@ def build_realm(realm, items, buckets, auctionator_scan):
 	full = [s for s in scans if s[1]]
 	latest_full = full[-1] if full and scan_day(full[-1][0]) == today else None
 
-	stats = {i: item_stats(e, today, points.get(i, [])) for i, e in arc.items() if e["d"]}
-	for i, s in stats.items():
+	# Statistics only use cleaned data (joke listings removed); the archive keeps everything.
+	clean, ignored, trolls = {}, {}, {}
+	stats = {}
+	for i, e in arc.items():
+		if not e["d"]:
+			continue
+		ce, cp, ign, troll = clean_item(i, e, points.get(i, []), items.get(i) or {}, tcfg)
+		clean[i], points[i], ignored[i] = ce, cp, ign
+		s = item_stats(ce, today, cp) if ce["d"] else blank_stats(e)
+		raw_days = sorted(int(d) for d in e["d"])
+		s.update(seen=len(raw_days), first=raw_days[0], last=raw_days[-1], troll=troll, ign=len(ign))
 		# "on the AH now": in the latest full scan when there is one from today, else seen today
 		s["inScan"] = int(i in latest_full[2]) if latest_full else int(s["last"] == today)
+		stats[i] = s
+	ignored_scans = {(i, x[0]) for i, ign in ignored.items() for x in ign}
+	if any(ignored.values()):
+		print(f"  {sum(len(x) for x in ignored.values())} joke prices ignored on {sum(1 for x in ignored.values() if x)} items")
 
 	def price_now(item_id):
 		s = stats.get(str(item_id))
@@ -304,7 +409,7 @@ def build_realm(realm, items, buckets, auctionator_scan):
 
 	# Index: one row per item, everything the list views need to filter and sort.
 	cols = ["id", "cur", "curDay", "curT", "a3", "a7", "a14", "a30", "all", "min", "max", "chg", "wk", "vs30", "vol",
-		"av", "avAvg", "n", "med", "pts", "seen", "first", "last", "inScan", "de", "deAvg", "deL", "deN"]
+		"av", "avAvg", "n", "med", "pts", "seen", "first", "last", "inScan", "troll", "ign", "de", "deAvg", "deL", "deN"]
 	rows = []
 	for item_id, s in stats.items():
 		meta = items.get(item_id) or {}
@@ -322,13 +427,15 @@ def build_realm(realm, items, buckets, auctionator_scan):
 	rows.sort(key=lambda r: r[0])
 	save_json(os.path.join(out, "index.json"), {"cols": cols, "today": today, "rows": rows})
 
-	# History shards: daily history [day, low, high, avail, scanMean, scans] and scans [t, min, qty, auctions, median].
+	# History shards: daily history [day, low, high, avail, scanMean, scans], scans [t, min, qty, auctions, median]
+	# and the joke prices that were left out [time or day, price, reason] (newest 50).
 	shards = {}
-	for item_id, e in arc.items():
+	for item_id, e in clean.items():
 		days = sorted((int(d), v) for d, v in e["d"].items())
 		shards.setdefault(int(item_id) % SHARDS, {})[item_id] = {
-			"d": [[d, v[0], v[1], v[2], v[3] if len(v) > 3 else None, v[4] if len(v) > 4 else 0] for d, v in days],
+			"d": [[d, *v] for d, v in days],
 			"s": [list(p) for p in points.get(item_id, [])],
+			"x": sorted(ignored[item_id], key=lambda x: x[0] if x[0] > 1e6 else SCAN_DAY_0 + x[0] * 86400)[-50:],
 		}
 	for n, shard in shards.items():
 		save_json(os.path.join(out, "h", f"{n}.json"), shard)
@@ -336,9 +443,9 @@ def build_realm(realm, items, buckets, auctionator_scan):
 	# Market over time, per day and per full scan. Value = lowest price x quantity, capped at twice the
 	# item's median (placeholder listings at 9999g would swamp the total). Price index = median of every
 	# item's price relative to its own average (100 = normal).
-	med = {i: statistics.median(v[0] for v in e["d"].values()) for i, e in arc.items() if e["d"]}
+	med = {i: statistics.median(v[0] for v in e["d"].values()) for i, e in clean.items() if e["d"]}
 	per_day = {}
-	for item_id, e in arc.items():
+	for item_id, e in clean.items():
 		s = stats.get(item_id)
 		if not s:
 			continue
@@ -361,6 +468,8 @@ def build_realm(realm, items, buckets, auctionator_scan):
 		listings = auctions = value = 0
 		rel = []
 		for item_id, (low, qty, n, _) in scan_items.items():
+			if (item_id, t) in ignored_scans:
+				continue
 			listings += qty
 			auctions += n
 			value += round(min(low, 2 * med.get(item_id, low)) * qty)
@@ -492,7 +601,7 @@ def export(cfg, fetch=True):
 		copy_tree(ARCHIVE, os.path.join(backup, "archive"))
 
 	buckets = read_disenchant_buckets(cfg)
-	summaries = [build_realm(r, items, buckets, auctionator_scan) for r in realms.values()]
+	summaries = [build_realm(r, items, buckets, auctionator_scan, troll_settings(cfg)) for r in realms.values()]
 	order = [n.lower() for n in cfg.get("realm_order") or []]
 	summaries.sort(key=lambda r: (order.index(r["name"].lower()) if r["name"].lower() in order else len(order), r["name"]))
 	for h in hidden:

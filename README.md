@@ -67,6 +67,15 @@ Hover any item for its in-game tooltip with auction, average, disenchant and ven
 - `realm_order`: order of the realm dropdown.
 - `scan_history_days`: how long per-scan detail is kept (daily history is kept forever).
 - `check_interval_seconds`: how often the sync looks for new data.
+- `troll_filter`: joke listings (an item worth nothing put up for thousands or millions of gold) are left out
+  of every price, average, chart and market total. The archive keeps them, so changing these settings
+  recalculates everything. A price is ignored when it is
+  - above `max_price_gold` (5,000g), or above the item's own cap in `item_max_gold` (`{"itemID": gold}`),
+  - a grey item at `trash_min_gold` (10g) or more and over `trash_vendor_multiple` (200) times its vendor price,
+  - more than `spike_factor` (20) times the item's usual price while `spike_max_quantity` (5) or fewer are
+    listed, or `extreme_factor` (100) times its usual price whatever the quantity.
+  The usual price is the lower median of all the item's prices, so a lasting real price change soon becomes
+  the new usual price. Item pages list every ignored price and why.
 - `site_title`: header title.
 - `push`: set `false` to only export.
 
