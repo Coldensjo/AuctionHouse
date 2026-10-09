@@ -346,14 +346,16 @@ async function browse(el, params) {
 // Item page
 // ---------------------------------------------------------------------------
 
+// Uncommon to epic armor and weapons, except wands (they cannot be disenchanted in this version).
+const disenchantable = it => (it.c === 2 || it.c === 4) && !(it.c === 2 && it.s === 19) && it.q >= 2 && it.q <= 4 && it.ilvl > 0;
 function eraDrops(it) {
-	if (!S.de || !(it.c === 2 || it.c === 4) || it.q < 2 || it.q > 4 || !it.ilvl) return null;
+	if (!S.de || !disenchantable(it)) return null;
 	const rows = S.de.era[it.c]?.[it.q] || [];
 	const row = rows.find(r => it.ilvl >= r[0] && it.ilvl <= r[1]);
 	return row ? row.slice(2).map(([chance, lo, hi, id]) => ({ id, chance, lo, hi, qty: chance / 100 * (lo + hi) / 2 })) : null;
 }
 function learnedDrops(it) {
-	if (!S.de || !(it.c === 2 || it.c === 4) || it.q < 2 || it.q > 4 || !it.ilvl) return null;
+	if (!S.de || !disenchantable(it)) return null;
 	const b = it.ilvl <= 15 ? 15 : Math.ceil(it.ilvl / 5) * 5;
 	const prefix = `${it.c}:${it.q}:`;
 	let rec = S.de.learned[prefix + b], approx = false;

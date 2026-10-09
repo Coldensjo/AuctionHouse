@@ -4,6 +4,7 @@ era_table(cls, quality, ilvl) gives the Classic Era drop table; learned buckets 
 DisenchantValueDB (what you actually got from your own disenchants).
 """
 WEAPON, ARMOR = 2, 4
+WAND = 19 # weapon subclass; wands cannot be disenchanted in this version
 BRACKET_SIZE, MAX_BRACKET_DISTANCE = 5, 2
 
 STRANGE_DUST, SOUL_DUST, VISION_DUST, DREAM_DUST, ILLUSION_DUST = 10940, 11083, 11137, 11176, 16204
@@ -75,7 +76,8 @@ ERA = {
 }
 
 def disenchantable(meta):
-	return bool(meta) and meta.get("c") in (WEAPON, ARMOR) and 2 <= meta.get("q", 0) <= 4 and meta.get("ilvl", 0) > 0
+	return (bool(meta) and meta.get("c") in (WEAPON, ARMOR) and 2 <= meta.get("q", 0) <= 4 and meta.get("ilvl", 0) > 0
+		and not (meta.get("c") == WEAPON and meta.get("s") == WAND))
 
 def bracket(ilvl):
 	return 15 if ilvl <= 15 else -(-ilvl // BRACKET_SIZE) * BRACKET_SIZE
