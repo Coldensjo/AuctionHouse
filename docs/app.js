@@ -1077,8 +1077,13 @@ async function disenchant(el, params, arg, token) {
 				<div class="box"><h3>Value by Item Level</h3><div id="brackets"></div><p class="note">Expected disenchant value of one item in each item level range at current prices.</p></div>
 			</div>
 		</div>`;
-	settings(el, "de", [{ k: "minp", label: "Min profit (silver)", v: 0 }], (f, reset) => {
-		const res = D.list.filter(it => it.deProfit != null && it.deProfit > f.minp * 100);
+	settings(el, "de", [
+		{ k: "minp", label: "Min profit (silver)", v: 0 },
+		{ k: "imin", label: "Min iLvl", v: 0 },
+		{ k: "imax", label: "Max iLvl", v: 0 },
+	], (f, reset) => {
+		const res = D.list.filter(it => it.deProfit != null && it.deProfit > f.minp * 100 &&
+			it.ilvl >= f.imin && (!f.imax || it.ilvl <= f.imax));
 		list($("#res", el), "de", res, ["item", "ilvl", "cur", "de", "deProfit", "av"], { sort: "deProfit", resetPage: reset, empty: "Nothing is worth disenchanting right now." });
 	});
 	list($("#mats", el), "mats", mats.filter(m => m.cur != null), ["item", "cur", "wk"], { sort: "cur", pageSize: 30, noPager: true });
