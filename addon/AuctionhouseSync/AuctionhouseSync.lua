@@ -11,6 +11,8 @@ Records full auction house scans for the auction house website.
 	* Per item the scan keeps the lowest unit price, quantity listed, number of auctions and median
 	  unit price. The auction list itself lets the website show who sells what and estimate what
 	  sold between two scans.
+	* The modern auction house leaves other players' names out of the full scan, but item searches
+	  have them: Scan Sellers searches every item one by one in the background (slow, throttled).
 	* The prices are also handed to Auctionator, so its tooltips stay current.
 	* Auctionator's own searches are recorded too (hooked on its price database). When its Full Scan
 	  button is used instead of ours, the result is read the same way.
@@ -19,6 +21,7 @@ Records full auction house scans for the auction house website.
 
 /ahsync          status
 /ahsync scan     full scan (auction house window open)
+/ahsync sellers  start, pause or resume the seller scan (modern auction house)
 /ahsync popup    toggle the reload popup after full scans
 /ahsync clear    forget stored scans
 ]]
@@ -60,8 +63,7 @@ local function AuctionInfo(i)
 	local _, count, buyout, bid, owner, ownerFull, itemID, hasAll, timeLeft
 	if MODERN then
 		_, _, count, _, _, _, _, _, _, buyout, bid, _, _, owner, ownerFull, _, itemID, hasAll = C_AuctionHouse.GetReplicateItemInfo(i - 1)
-		timeLeft = C_AuctionHouse.GetReplicateItemTimeLeft(i - 1)
-		timeLeft = timeLeft and timeLeft + 1 -- Enum.AuctionHouseTimeLeftBand starts at 0
+		timeLeft = C_AuctionHouse.GetReplicateItemTimeLeft(i - 1) -- 1 short .. 4 very long, like the classic API
 	else
 		_, _, count, _, _, _, _, _, _, buyout, bid, _, _, owner, ownerFull, _, itemID, hasAll = GetAuctionItemInfo("list", i)
 		timeLeft = GetAuctionItemTimeLeft("list", i)
@@ -244,6 +246,173 @@ local function FeedAuctionator(byItem)
 end
 
 -- ---------------------------------------------------------------------------
+-- Seller scan (modern auction house). The full scan does not name other players' auctions;
+-- searches do. So this searches every item of the latest full scan one by one, most valuable
+-- first. The server throttles searches, so it is slow and runs in the background while the
+-- auction house is open, and resumes where it left off.
+-- db.crawl = {started, realm, faction, queue = {itemIDs}, pos, results = {[itemID] = {t, rows}}}
+-- rows: "quantity:unit price:seller/seller:number of sellers;..." (commodity rows can have several)
+-- ---------------------------------------------------------------------------
+
+local CRAWL_TIMEOUT = 10 -- seconds to wait for a search before skipping the item
+local CRAWL_MAX_PAGES = 3 -- extra result pages requested per item
+local CRAWL_FRESH = 12 * 3600 -- a seller scan started longer ago than this starts over
+local CRAWL_KEEP = 3 -- finished seller scans kept for the sync program
+local crawling = false
+local crawlItem, crawlKey, crawlSent, crawlPages
+local crawlButton
+local crawlFrame = CreateFrame("Frame")
+local CRAWL_EVENTS = { "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "ITEM_SEARCH_RESULTS_UPDATED", "COMMODITY_SEARCH_RESULTS_UPDATED" }
+
+StaticPopupDialogs["AUCTIONHOUSESYNC_CRAWL_DONE"] = {
+	text = "Auctionhouse Sync\n\nSeller scan finished (%s items).\nReload the UI now so it can be uploaded to the website?",
+	button1 = "Reload & Upload",
+	button2 = "Later",
+	OnAccept = function() ReloadUI() end,
+	timeout = 0,
+	whileDead = true,
+	hideOnEscape = true,
+	preferredIndex = 3,
+}
+
+-- Item IDs of the newest full scan, most valuable first
+local function CrawlQueue()
+	local latest
+	for i = #db.scans, 1, -1 do
+		if db.scans[i].auc then
+			latest = db.scans[i]
+			break
+		end
+	end
+	if not latest then return nil end
+	local value, ids = {}, {}
+	for part in latest.auc:gmatch("[^,]+") do
+		local id, _, buyout = part:match("^(%d+):(%d+):(%d+):")
+		if id then
+			id = tonumber(id)
+			if not value[id] then ids[#ids + 1] = id end
+			value[id] = (value[id] or 0) + tonumber(buyout)
+		end
+	end
+	table.sort(ids, function(a, b) return value[a] > value[b] end)
+	return ids
+end
+
+local function UpdateCrawlButton()
+	if not crawlButton then return end
+	local c = db.crawl
+	if crawling then
+		crawlButton:SetText(("Stop (%d/%d)"):format(c.pos - 1, #c.queue))
+	elseif c and c.pos <= #c.queue and time() - c.started <= CRAWL_FRESH then
+		crawlButton:SetText(("Resume (%d/%d)"):format(c.pos - 1, #c.queue))
+	else
+		crawlButton:SetText("Scan Sellers")
+	end
+	if scanning then crawlButton:Disable() else crawlButton:Enable() end
+end
+
+local CrawlNext
+
+local function CrawlStop(why)
+	crawling, crawlSent = false, nil
+	FrameUtil.UnregisterFrameForEvents(crawlFrame, CRAWL_EVENTS)
+	local c = db.crawl
+	if c and c.pos > #c.queue then -- finished: keep it for the sync program
+		db.crawlDone = db.crawlDone or {}
+		table.insert(db.crawlDone, { started = c.started, realm = c.realm, faction = c.faction, results = c.results })
+		while #db.crawlDone > CRAWL_KEEP do table.remove(db.crawlDone, 1) end
+		db.crawl = nil
+		Print(("seller scan finished: %d items. It is uploaded on your next /reload, logout or exit."):format(#c.queue))
+		if db.popup then StaticPopup_Show("AUCTIONHOUSESYNC_CRAWL_DONE", #c.queue) end
+	elseif why then
+		Print(("seller scan %s at %d of %d items. Click Resume (or /ahsync sellers) to go on."):format(why, c.pos - 1, #c.queue))
+	end
+	UpdateCrawlButton()
+end
+
+-- Records the item's search results and moves on
+local function CrawlDone(rows)
+	local c = db.crawl
+	if rows then c.results[crawlItem] = { t = time(), r = rows } end
+	c.pos = c.pos + 1
+	crawlSent = nil
+	UpdateCrawlButton()
+	C_Timer.After(0.05, CrawlNext)
+end
+
+local function CrawlResults(commodity)
+	local full
+	if commodity then full = C_AuctionHouse.HasFullCommoditySearchResults(crawlItem) else full = C_AuctionHouse.HasFullItemSearchResults(crawlKey) end
+	if not full and crawlPages < CRAWL_MAX_PAGES then
+		crawlPages = crawlPages + 1
+		if commodity then C_AuctionHouse.RequestMoreCommoditySearchResults(crawlItem) else C_AuctionHouse.RequestMoreItemSearchResults(crawlKey) end
+		return -- the results event comes again
+	end
+	local me = UnitName("player")
+	local n = commodity and C_AuctionHouse.GetNumCommoditySearchResults(crawlItem) or C_AuctionHouse.GetNumItemSearchResults(crawlKey)
+	local rows = {}
+	for i = 1, n or 0 do
+		local r
+		if commodity then r = C_AuctionHouse.GetCommoditySearchResultInfo(crawlItem, i) else r = C_AuctionHouse.GetItemSearchResultInfo(crawlKey, i) end
+		if r then
+			local owners = {}
+			for _, o in ipairs(r.owners or {}) do owners[#owners + 1] = (o == "player") and me or o end
+			local qty = r.quantity or 1
+			local unit = r.unitPrice or (r.buyoutAmount and math.ceil(r.buyoutAmount / math.max(1, qty))) or 0
+			rows[#rows + 1] = qty .. ":" .. unit .. ":" .. table.concat(owners, "/") .. ":" .. (r.totalNumberOfOwners or #owners)
+		end
+	end
+	CrawlDone(table.concat(rows, ";"))
+end
+
+CrawlNext = function()
+	if not crawling or crawlSent then return end
+	local c = db.crawl
+	if not ahOpen then return CrawlStop("paused (auction house closed)") end
+	if c.pos > #c.queue then return CrawlStop() end
+	if not C_AuctionHouse.IsThrottledMessageSystemReady() then return end -- AUCTION_HOUSE_THROTTLED_SYSTEM_READY calls again
+	crawlItem, crawlPages = c.queue[c.pos], 0
+	crawlKey = C_AuctionHouse.MakeItemKey(crawlItem)
+	local sent = GetTime()
+	crawlSent = sent
+	C_AuctionHouse.SendSearchQuery(crawlKey, { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }, true)
+	C_Timer.After(CRAWL_TIMEOUT, function()
+		if crawling and crawlSent == sent then CrawlDone(nil) end -- no answer: skip the item
+	end)
+end
+
+crawlFrame:SetScript("OnEvent", function(_, event, arg)
+	if not crawling then return end
+	if event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" then
+		CrawlNext()
+	elseif event == "ITEM_SEARCH_RESULTS_UPDATED" then
+		if crawlSent and type(arg) == "table" and arg.itemID == crawlItem then CrawlResults(false) end
+	elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
+		if crawlSent and arg == crawlItem then CrawlResults(true) end
+	end
+end)
+
+local function CrawlStart()
+	if crawling then return CrawlStop("stopped") end
+	if not MODERN then return Print("not needed here: on this auction house the full scan already has the sellers") end
+	if not ahOpen then return Print("open the auction house first") end
+	if scanning then return Print("wait for the full scan to finish") end
+	local c = db.crawl
+	if not c or c.pos > #c.queue or time() - c.started > CRAWL_FRESH then
+		local queue = CrawlQueue()
+		if not queue then return Print("run a full scan first: the seller scan searches the items it found") end
+		c = { started = time(), realm = RealmKey(), faction = UnitFactionGroup("player"), queue = queue, pos = 1, results = {} }
+		db.crawl = c
+	end
+	crawling = true
+	FrameUtil.RegisterFrameForEvents(crawlFrame, CRAWL_EVENTS)
+	Print(("seller scan: %d of %d items to go, most valuable first. It runs while the auction house is open; click Stop to pause.")
+		:format(#c.queue - c.pos + 1, #c.queue))
+	UpdateCrawlButton()
+	CrawlNext()
+end
+
+-- ---------------------------------------------------------------------------
 -- Our own full scan
 -- ---------------------------------------------------------------------------
 
@@ -266,6 +435,7 @@ local function CanScan()
 end
 
 local function UpdateButton(text)
+	UpdateCrawlButton()
 	if not button then return end
 	if scanning then
 		button:SetText(text or "Scanning...")
@@ -303,6 +473,7 @@ end
 local function StartScan()
 	if scanning then return Print("a scan is already running") end
 	if not ahOpen then return Print("open the auction house first") end
+	if crawling then CrawlStop("paused for the full scan") end
 	if not CanScan() then
 		local left = Cooldown()
 		return Print(left > 0 and ("the next full scan is allowed in %d:%02d"):format(math.floor(left / 60), left % 60)
@@ -362,6 +533,19 @@ local function CreateButton()
 		GameTooltip:Show()
 	end)
 	button:SetScript("OnLeave", GameTooltip_Hide)
+	if MODERN then
+		crawlButton = CreateFrame("Button", "AuctionhouseSyncSellersButton", parent, "UIPanelButtonTemplate")
+		crawlButton:SetSize(130, 22)
+		crawlButton:SetPoint("RIGHT", button, "LEFT", -4, 0)
+		crawlButton:SetScript("OnClick", CrawlStart)
+		crawlButton:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+			GameTooltip:SetText("Scan Sellers")
+			GameTooltip:AddLine("The full scan does not include other players' names. This searches every item one by one to find who sells what. Slow (the server limits searches): it runs while the auction house is open and can be paused and resumed.", 1, 1, 1, true)
+			GameTooltip:Show()
+		end)
+		crawlButton:SetScript("OnLeave", GameTooltip_Hide)
+	end
 	C_Timer.NewTicker(1, function()
 		if ahOpen then UpdateButton() end
 	end)
@@ -420,6 +604,7 @@ frame:SetScript("OnEvent", function(_, event, name)
 		UpdateButton()
 	elseif event == "AUCTION_HOUSE_CLOSED" then
 		ahOpen = false
+		if crawling then CrawlStop("paused (auction house closed)") end
 		if scanning and not reading then
 			FinishScan(nil)
 		elseif scanning then
@@ -445,11 +630,14 @@ SlashCmdList["AUCTIONHOUSESYNC"] = function(msg)
 	local cmd = (msg or ""):lower():match("^(%S*)")
 	if cmd == "scan" then
 		StartScan()
+	elseif cmd == "sellers" then
+		CrawlStart()
 	elseif cmd == "popup" then
 		db.popup = not db.popup
 		Print("reload popup after full scans: " .. (db.popup and "on" or "off"))
 	elseif cmd == "clear" then
 		wipe(db.scans)
+		db.crawl, db.crawlDone = nil, nil
 		Print("stored scans cleared")
 	else
 		local full, latest = 0, nil
@@ -462,6 +650,8 @@ SlashCmdList["AUCTIONHOUSESYNC"] = function(msg)
 			local sellers = latest.owners ~= "" and select(2, latest.owners:gsub(",", ",")) + 1 or 0
 			Print(("latest auction list: %d auctions, %d sellers (%s)"):format(latest.na, sellers, date("%H:%M", latest.t)))
 		end
-		Print("/ahsync scan | /ahsync popup | /ahsync clear")
+		if db.crawl then Print(("seller scan in progress: %d of %d items"):format(db.crawl.pos - 1, #db.crawl.queue)) end
+		if db.crawlDone and #db.crawlDone > 0 then Print(("finished seller scans waiting to upload: %d"):format(#db.crawlDone)) end
+		Print("/ahsync scan | /ahsync sellers | /ahsync popup | /ahsync clear")
 	end
 end

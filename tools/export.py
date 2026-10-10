@@ -126,6 +126,24 @@ def read_sync_scans(cfg):
 				auctions = sales.parse(luasv.text(s.get("auc")), luasv.text(s.get("owners")), luasv.text(s.get("ah"))) if s.get("auc") else None
 				yield luasv.text(s.get("realm")) or "", int(s["t"]), full, luasv.text(s.get("faction")) or "", items, auctions or None
 
+def read_seller_scans(cfg):
+	"""Yields (realm, faction, started, itemID, time, rows) for every item result of the addon's seller scans
+	(the one in progress and the finished ones). rows: [[qty, unit, [sellers], number of sellers]]."""
+	for path in saved_variables(cfg, "AuctionhouseSync"):
+		try:
+			db = luasv.load(path).get("AuctionhouseSyncDB") or {}
+		except Exception as e:
+			print(f"  skipping {path}: {e}", file=sys.stderr)
+			continue
+		crawls = list((db.get("crawlDone") or {}).values()) + ([db["crawl"]] if isinstance(db.get("crawl"), dict) else [])
+		for c in crawls:
+			if not isinstance(c, dict):
+				continue
+			realm, faction, started = luasv.text(c.get("realm")) or "", luasv.text(c.get("faction")) or "", int(c.get("started") or 0)
+			for item_id, r in (c.get("results") or {}).items():
+				if isinstance(r, dict) and r.get("t"):
+					yield realm, faction, started, int(item_id), int(r["t"]), sales.parse_crawl(luasv.text(r.get("r")))
+
 def read_disenchant_buckets(cfg):
 	"""Learned disenchant results from the DisenchantValue addon, merged over all accounts."""
 	merged = {}
@@ -469,6 +487,19 @@ def build_realm(realm, items, buckets, auctionator_scan, tcfg):
 					n["value"] += buyout or bid
 	for rows in current.values():
 		rows.sort(key=lambda a: ((a[2] or a[4]) / max(1, a[1])) if (a[2] or a[4]) else float("inf"))
+	crawl_now = realm.store.crawl_now()
+	if crawl_now: # modern auction house: the sellers come from the seller scan
+		seller_now = {}
+		for item_id, (t, rows) in crawl_now.items():
+			for qty, unit, owners, total in rows:
+				share = 1 / max(1, total, len(owners))
+				for owner in owners:
+					n = seller_now.setdefault(owner, {"auctions": [], "value": 0, "items": set()})
+					q = max(1, round(qty * share))
+					n["auctions"].append([int(item_id), q, unit * q, 0, 0])
+					n["items"].add(int(item_id))
+					if ok_price(int(item_id), unit):
+						n["value"] += unit * q
 
 	def price_now(item_id):
 		s = stats.get(str(item_id))
@@ -511,6 +542,7 @@ def build_realm(realm, items, buckets, auctionator_scan, tcfg):
 			"x": sorted(ignored[item_id], key=lambda x: x[0] if x[0] > 1e6 else SCAN_DAY_0 + x[0] * 86400)[-50:],
 			"sl": sorted(sold.get(item_id, [])),
 			"a": current.get(item_id, [])[:100],
+			"sv": crawl_now.get(item_id), # seller scan: [time, [[qty, unit, [sellers], number of sellers]]]
 		}
 	for n, shard in shards.items():
 		save_json(os.path.join(out, "h", f"{n}.json"), shard)
@@ -687,6 +719,13 @@ def export(cfg, fetch=True):
 		print(f"  {new_scans} new scans from AuctionhouseSync")
 	if new_lists:
 		print(f"  {new_lists} new auction lists")
+	new_crawled = 0
+	for raw, faction, started, item_id, t, rows in read_seller_scans(cfg):
+		r = realm(raw)
+		if r and r.store.add_crawl(started, item_id, t, rows, r.price_check(tcfg)):
+			new_crawled += 1
+	if new_crawled:
+		print(f"  {new_crawled} items from seller scans")
 
 	realms = {n: r for n, r in realms.items() if r.items}
 	keep_days = cfg.get("scan_history_days") or 45

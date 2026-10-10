@@ -10,6 +10,11 @@ A World of Warcraft Classic styled website for your Auctionator scan data, hoste
    It reads every auction with its seller, and also updates Auctionator's prices. A full scan is allowed
    once every 15 minutes. When it finishes, the addon asks **Reload & Upload**. Click it, and the scan is on
    the website a minute or two later. (Auctionator's own Full Scan button works too.)
+3. For sellers, click **Scan Sellers** next to Full Scan (or `/ahsync sellers`). The modern auction house leaves
+   other players' names out of the full scan, but item searches have them, so this searches every item of the
+   latest full scan one by one, most valuable first. The server limits searches, so it takes a while (roughly
+   20 to 60 minutes for everything). It runs while the auction house is open, can be stopped and resumed,
+   and offers **Reload & Upload** when it is done.
 
 WoW only writes addon data to disk on `/reload`, logout or exit, so that is when a scan can be uploaded.
 If you click **Later**, the scan is kept and uploaded on your next reload, logout or exit.
@@ -23,7 +28,8 @@ If you click **Later**, the scan is kept and uploaded on your next reload, logou
 | `preview.bat` | Export without uploading and open the site locally |
 
 The sync log is `state/sync.log`. In game, `/ahsync` shows how many scans are stored, `/ahsync scan` runs a
-full scan, `/ahsync popup` turns the reload question on or off.
+full scan, `/ahsync sellers` starts, pauses or resumes the seller scan, `/ahsync popup` turns the reload
+question on or off.
 
 ## What the site shows
 

@@ -16,9 +16,13 @@ row are compared:
 Auctions that are listed and bought between two scans are never seen, so the estimate is a lower
 bound and gets better with more scans.
 
+On the modern auction house the full scan leaves other players' names out. The addon's seller scan
+searches every item instead; its results (per item: rows of quantity, unit price and sellers) are the
+source of the sellers there. A commodity row can have several sellers: its quantity is split evenly.
+
 Archive per realm: auctions/<time>-<faction>.json (the auction lists, kept AUCTION_KEEP_DAYS),
-sales.json (estimates per day and per scan pair, kept forever) and sellers.json (what each seller
-listed, per scan and per item).
+sales.json (estimates per day and per scan pair, kept forever), sellers.json (what each seller
+listed, per scan and per item) and crawl.json (the newest seller scan result per item).
 """
 import glob
 import os
@@ -44,6 +48,17 @@ def parse(auc, owners, ah=None):
 		o = int(f[3])
 		tl = int(f[4])
 		out.append([int(f[0]), int(f[1]), int(f[2]), names[o - 1] if 0 < o <= len(names) else "", tl + tl_base if tl else 0, int(f[5])])
+	return out
+
+def parse_crawl(rows):
+	"""The addon's seller scan rows "qty:unit:seller/seller:sellers;..." into [[qty, unit, [sellers], number of sellers]]."""
+	out = []
+	for part in (rows or "").split(";"):
+		f = part.split(":")
+		if len(f) != 4 or not f[0].isdigit() or not f[1].isdigit():
+			continue
+		owners = [o for o in f[2].split("/") if o]
+		out.append([int(f[0]), int(f[1]), owners, int(f[3]) if f[3].isdigit() else len(owners)])
 	return out
 
 def still_running(time_left, dt):
@@ -142,6 +157,7 @@ class Store:
 		self.load_json, self.save_json, self.scan_day = load_json, save_json, scan_day
 		self.sales = load_json(os.path.join(folder, "sales.json"), {"pairs": {}, "days": {}, "cover": {}, "sellers": {}})
 		self.sellers = load_json(os.path.join(folder, "sellers.json"), {})
+		self.crawl = load_json(os.path.join(folder, "crawl.json"), {}) # itemID -> [time, seller scan start, rows]
 		self.dirty = False
 
 	def lists(self):
@@ -177,6 +193,40 @@ class Store:
 				it[2] = round(unit)
 		self.dirty = True
 		return True
+
+	def add_crawl(self, started, item_id, t, rows, ok_price):
+		"""Merges one item's seller scan result. False when it is not newer than the stored one."""
+		key = str(item_id)
+		if key in self.crawl and self.crawl[key][0] >= t:
+			return False
+		self.crawl[key] = [t, started, rows]
+		hist_key = str(started)
+		seen = set()
+		for qty, unit, owners, total in rows:
+			share = 1 / max(1, total, len(owners))
+			for owner in owners:
+				s = self.sellers.setdefault(owner, {"first": t, "last": t, "hist": {}, "items": {}})
+				s["first"], s["last"] = min(s["first"], t), max(s["last"], t)
+				h = s["hist"].setdefault(hist_key, [0, 0])
+				h[0] = round(h[0] + share, 2)
+				it = s["items"].setdefault(key, [0, t, 0])
+				if owner not in seen:
+					it[0] += 1
+					it[2] = 0
+					seen.add(owner)
+				it[1] = max(it[1], t)
+				if ok_price(item_id, unit):
+					h[1] += round(qty * share * unit)
+					it[2] = min(it[2], unit) if it[2] else unit
+		self.dirty = True
+		return True
+
+	def crawl_now(self, max_age=2 * 86400):
+		"""Seller scan results no older than max_age before the newest: {itemID: [time, rows]}."""
+		if not self.crawl:
+			return {}
+		newest = max(v[0] for v in self.crawl.values())
+		return {k: [v[0], v[2]] for k, v in self.crawl.items() if v[0] >= newest - max_age}
 
 	def update(self, ok_price):
 		"""Compares every stored auction list with the previous one of the same faction (once)."""
@@ -228,6 +278,7 @@ class Store:
 		if self.dirty:
 			self.save_json(os.path.join(self.dir, "sales.json"), self.sales)
 			self.save_json(os.path.join(self.dir, "sellers.json"), self.sellers)
+			self.save_json(os.path.join(self.dir, "crawl.json"), self.crawl)
 			self.dirty = False
 
 	def latest(self, max_age=2 * 86400):

@@ -468,6 +468,8 @@ async function itemView(el, params, arg, token) {
 	// estimated sales per day [day, units, value, auctions bought, auctions gone]; current auctions [seller, qty, buyout, timeLeft, bid]
 	const sales = (hist.sl || []).map(([d, units, value, bought, gone]) => ({ d, units, value, bought, gone }));
 	const auctions = hist.a || [];
+	const named = auctions.some(a => a[0]);
+	const sv = hist.sv; // seller scan: [time, [[qty, unit, [sellers], number of sellers]]]
 
 	el.innerHTML = `
 		<div class="item-head">
@@ -539,9 +541,14 @@ async function itemView(el, params, arg, token) {
 					</div>
 					${sales.some(p => p.units > 0) ? `<div class="chart short" id="sales"></div>` : ""}<p class="note">${SALES_NOTE}</p></div>` : ""}
 				${auctions.length ? `<div class="box"><h3>Current Auctions <span class="muted" style="font-size:13px">(${auctions.length}${auctions.length >= 100 ? "+" : ""} &middot; ${new Set(auctions.map(a => a[0]).filter(Boolean)).size} sellers)</span></h3>
-					<div class="tbl-wrap" style="max-height:360px;overflow:auto"><table class="list"><thead><tr><th class="nosort">Seller</th><th class="r nosort">Qty</th><th class="r nosort">Each</th><th class="r nosort">Buyout</th><th class="r nosort">Bid</th><th class="nosort">Time Left</th></tr></thead><tbody>
-					${auctions.map(([who, qty, buyout, tl, bid]) => `<tr><td>${sellerLink(who)}</td><td class="r">${qty}</td><td class="r">${buyout ? money(Math.ceil(buyout / qty)) : num(null)}</td><td class="r">${buyout ? money(buyout) : num(null)}</td><td class="r">${bid ? money(bid) : num(null)}</td><td>${timeLeft(tl)}</td></tr>`).join("")}
-					</tbody></table></div><p class="note">From the latest full scan with its auction list.</p></div>` : ""}
+					<div class="tbl-wrap" style="max-height:360px;overflow:auto"><table class="list"><thead><tr>${named ? `<th class="nosort">Seller</th>` : ""}<th class="r nosort">Qty</th><th class="r nosort">Each</th><th class="r nosort">Buyout</th><th class="r nosort">Bid</th><th class="nosort">Time Left</th></tr></thead><tbody>
+					${auctions.map(([who, qty, buyout, tl, bid]) => `<tr>${named ? `<td>${sellerLink(who)}</td>` : ""}<td class="r">${qty}</td><td class="r">${buyout ? money(Math.ceil(buyout / qty)) : num(null)}</td><td class="r">${buyout ? money(buyout) : num(null)}</td><td class="r">${bid ? money(bid) : num(null)}</td><td>${timeLeft(tl)}</td></tr>`).join("")}
+					</tbody></table></div><p class="note">From the latest full scan.${named ? "" : " Sellers are in the box below when a seller scan has searched this item."}</p></div>` : ""}
+				${sv ? `<div class="box"><h3>Sellers <span class="muted" style="font-size:13px">(searched ${timeAgo(sv[0])})</span></h3>
+					<div class="tbl-wrap" style="max-height:360px;overflow:auto"><table class="list"><thead><tr><th class="nosort">Seller</th><th class="r nosort">Qty</th><th class="r nosort">Each</th></tr></thead><tbody>
+					${sv[1].length ? sv[1].map(([qty, unit, owners, total]) => `<tr><td>${owners.length ? owners.map(sellerLink).join(", ") : sellerLink("")}${total > owners.length ? ` <span class="muted">+${total - owners.length} more</span>` : ""}</td><td class="r">${num(qty)}</td><td class="r">${money(unit)}</td></tr>`).join("")
+						: `<tr class="empty"><td colspan="3">None listed when it was searched.</td></tr>`}
+					</tbody></table></div><p class="note">From the addon's seller scan, which searches every item one by one.</p></div>` : ""}
 				${hours.size >= 4 ? `<div class="box"><h3>Best Time of Day</h3><div class="chart short" id="hours"></div><p class="note">Average lowest price at each hour of the day (your local time) relative to the item's average, from ${scans.length} scans. Lower is a better time to buy, higher a better time to sell.</p></div>` : ""}
 				${all.length >= 7 ? `<div class="box"><h3>Best Day to Buy and Sell</h3><div class="chart short" id="weekday"></div><p class="note">Average price on each weekday relative to the item's overall average. Lower is a better day to buy, higher a better day to sell.</p></div>` : ""}
 				${eraT || learnedT ? `<div class="box"><h3>Disenchanting</h3>
@@ -894,7 +901,7 @@ Object.assign(COLS, {
 	sValue: { label: "Listed Value", title: "Buyout value of their auctions in the latest scan", sort: r => r.value, cls: "r", fmt: r => money(r.value) },
 	sItems: { label: "Items", title: "Different items in the latest scan", sort: r => r.items, cls: "r", fmt: r => num(r.items) },
 	sSold: { label: "Sales 30d", title: "Estimated value sold in the last 30 days", sort: r => r.soldValue30, cls: "r", fmt: r => money(r.soldValue30) },
-	sScans: { label: "Scans", title: "Scans they had auctions in", sort: r => r.scans, cls: "r", fmt: r => num(r.scans) },
+	sScans: { label: "Scans", title: "Scans (and seller scans) they had auctions in", sort: r => r.scans, cls: "r", fmt: r => num(r.scans) },
 	sLast: { label: "Last Seen", sort: r => r.last, cls: "r", fmt: r => (r.last ? timeAgo(r.last) : num(null)) },
 	aQty: { label: "Qty", sort: r => r.qty, cls: "r", fmt: r => r.qty },
 	aEach: { label: "Each", sort: r => r.each, cls: "r", fmt: r => money(r.each) },
@@ -908,7 +915,7 @@ Object.assign(COLS, {
 Object.assign(COL_WIDTHS, { sName: 0, sAuctions: 84, sItems: 64, sScans: 64, sLast: 96, aQty: 52, aLeft: 90, iSeen: 64, iLast: 104 });
 for (const c of ["sValue", "sSold", "aEach", "aBuyout", "aBid", "iPrice"]) MONEY_COLS.add(c);
 
-const NO_SELLERS = `<p class="note" style="margin:0">Sellers come from full scans made with the <b>Full Scan</b> button that the AuctionhouseSync addon adds to the auction house window (or <b>/ahsync scan</b>).</p>`;
+const NO_SELLERS = `<p class="note" style="margin:0">Sellers come from the AuctionhouseSync addon. On the modern auction house the full scan does not include other players' names: click <b>Scan Sellers</b> next to the Full Scan button (or <b>/ahsync sellers</b>). It searches every item one by one, which takes a while, then click <b>Reload &amp; Upload</b>.</p>`;
 
 async function sellers(el, params) {
 	const D = await loadSellers();
@@ -922,6 +929,7 @@ async function sellers(el, params) {
 	const totalValue = sum(active, r => r.value) || 1;
 	const byValue = active.slice().sort((a, b) => b.value - a.value);
 	const top10 = sum(byValue.slice(0, 10), r => r.value);
+	const withSales = D.rows.some(r => r.soldValue30 > 0);
 	el.innerHTML = `<h2>Sellers</h2>
 		<div class="cards" style="margin-bottom:16px">
 			${card("Sellers Now", num(active.length), `${num(D.rows.length)} <span class="muted">seen in all</span>`)}
@@ -933,11 +941,11 @@ async function sellers(el, params) {
 		<div class="toolbar"><label>Find <input id="s-q" type="search" placeholder="Seller name" value="${esc(params.get("q") || "")}"></label>
 			<label class="chk"><input type="checkbox" id="s-now" ${params.get("all") ? "" : "checked"}> Only sellers in the latest scan</label><span class="grow"></span></div>
 		<div id="s-list"></div>
-		<p class="note">Listed value leaves out joke prices. Latest auction list${D.lists.length > 1 ? "s" : ""}: ${D.lists.map(([t, f]) => `${esc(f)} ${timeLong(t)}`).join(", ")}.</p>`;
+		<p class="note">Listed value leaves out joke prices. On the modern auction house the sellers come from the addon's seller scan (Scan Sellers), which searches every item one by one; a stack shared by several sellers is split evenly between them.</p>`;
 	const render = reset => {
 		const q = $("#s-q", el).value.trim().toLowerCase();
 		const rows = D.rows.filter(r => (!$("#s-now", el).checked || r.auctions > 0) && (!q || r.name.toLowerCase().includes(q)));
-		list($("#s-list", el), "sellers", rows, ["sName", "sAuctions", "sItems", "sValue", "sSold", "sScans", "sLast"],
+		list($("#s-list", el), "sellers", rows, ["sName", "sAuctions", "sItems", "sValue", ...(withSales ? ["sSold"] : []), "sScans", "sLast"],
 			{ sort: "sValue", resetPage: reset, rowHref: r => href("seller", r.name), empty: "No sellers match." });
 	};
 	$("#s-q", el).oninput = () => render(true);
@@ -979,11 +987,11 @@ async function sellerView(el, params, arg, token) {
 		<div class="cards" style="margin-bottom:16px">
 			${card("Auctions Now", num(row.auctions), `${num(row.items)} <span class="muted">different items</span>`)}
 			${card("Listed Value", money(row.value), `<span class="muted">in the latest scan</span>`)}
-			${card("Est. Sales (30d)", money(row.soldValue30), `${num(row.sold30)} <span class="muted">items sold</span>`)}
+			${row.soldValue30 > 0 ? card("Est. Sales (30d)", money(row.soldValue30), `${num(row.sold30)} <span class="muted">items sold</span>`) : ""}
 			${card("Seen In", `${num(row.scans)} <span class="muted" style="font-size:13px">scans</span>`, `${num(row.itemsEver)} <span class="muted">items listed in all</span>`)}
 		</div>
 		<div class="grid2" style="margin-bottom:14px">
-			${hist.length ? `<div class="box"><h3>Auctions per Scan</h3><div class="chart short" id="sv-hist"></div><p class="note">Bars: auctions. Line: their listed value.</p></div>` : ""}
+			${hist.length ? `<div class="box"><h3>Auctions per Scan</h3><div class="chart short" id="sv-hist"></div><p class="note">Bars: auctions. Line: their listed value. Per full scan, or per seller scan on the modern auction house.</p></div>` : ""}
 			${sales.length ? `<div class="box"><h3>Estimated Sales per Day</h3><div class="chart short" id="sv-sales"></div><p class="note">${SALES_NOTE}</p></div>` : ""}
 		</div>
 		<div class="box" style="margin-bottom:14px"><h3>Current Auctions</h3>${now.length ? `<div id="sv-now"></div>` : `<p class="note" style="margin:0">None in the latest scan.</p>`}</div>
