@@ -240,7 +240,10 @@ function colWidth(c) {
 
 function list(el, key, data, cols, opts = {}) {
 	const st = S.lists[key] || (S.lists[key] = { sort: opts.sort || cols[0], dir: opts.dir ?? -1, page: 0 });
-	if (opts.resetPage) st.page = 0;
+	if (opts.resetPage) {
+		st.page = 0;
+		opts = { ...opts, resetPage: false }; // only this render; the pager and sort clicks below re-render with opts
+	}
 	const col = COLS[st.sort] || COLS[cols[0]];
 	const sorted = data.slice().sort((a, b) => {
 		const x = col.sort(a), y = col.sort(b);
@@ -303,7 +306,7 @@ async function browse(el, params) {
 	st.page = +params.get("page") || 0;
 	const f = {
 		q: params.get("q") || "", c: params.get("c") ?? "", s: params.get("s") ?? "",
-		lmin: params.get("lmin") || "", lmax: params.get("lmax") || "", qmin: params.get("qmin") || "",
+		lmin: params.get("lmin") || "", lmax: params.get("lmax") || "", imin: params.get("imin") || "", imax: params.get("imax") || "", qmin: params.get("qmin") || "",
 		pmin: params.get("pmin") || "", pmax: params.get("pmax") || "", now: params.get("now") === "1",
 	};
 
@@ -331,6 +334,7 @@ async function browse(el, params) {
 		<form class="filters" id="filters" autocomplete="off">
 			<div class="f name"><span>Name</span><input name="q" type="search" value="${esc(f.q)}" placeholder="Item name or ID"></div>
 			<div class="f"><span>Level Range</span><div class="range"><input name="lmin" type="number" min="0" max="80" value="${esc(f.lmin)}"> - <input name="lmax" type="number" min="0" max="80" value="${esc(f.lmax)}"></div></div>
+			<div class="f"><span>Item Level</span><div class="range"><input name="imin" type="number" min="0" value="${esc(f.imin)}"> - <input name="imax" type="number" min="0" value="${esc(f.imax)}"></div></div>
 			<div class="f"><span>Rarity</span><select name="qmin"><option value="">All</option>${QUALITY.slice(0, 6).map((n, i) => `<option value="${i}" class="q${i}" ${f.qmin === String(i) ? "selected" : ""}>${n}${i < 5 ? " +" : ""}</option>`).join("")}</select></div>
 			<div class="f"><span>Price (gold)</span><div class="range"><input name="pmin" type="number" min="0" step="any" value="${esc(f.pmin)}"> - <input name="pmax" type="number" min="0" step="any" value="${esc(f.pmax)}"></div></div>
 			<div class="f"><label class="chk"><input name="now" type="checkbox" ${f.now ? "checked" : ""}> On the AH now</label></div>
@@ -346,13 +350,15 @@ async function browse(el, params) {
 		const qWords = f.q.toLowerCase().split(/\s+/).filter(Boolean);
 		const qmin = f.qmin === "" ? -1 : +f.qmin, pmin = f.pmin === "" ? null : f.pmin * 10000, pmax = f.pmax === "" ? null : f.pmax * 10000;
 		const lmin = f.lmin === "" ? null : +f.lmin, lmax = f.lmax === "" ? null : +f.lmax;
+		const imin = f.imin === "" ? null : +f.imin, imax = f.imax === "" ? null : +f.imax;
 		const res = D.list.filter(it =>
 			(f.c === "" || String(it.c) === f.c) && (f.s === "" || String(it.s) === f.s) &&
 			(qmin < 0 || it.q >= qmin) && (!f.now || it.inScan) &&
 			(lmin == null || it.req >= lmin) && (lmax == null || it.req <= lmax) &&
+			(imin == null || it.ilvl >= imin) && (imax == null || it.ilvl <= imax) &&
 			(pmin == null || it.cur >= pmin) && (pmax == null || it.cur <= pmax) &&
 			(!qWords.length || String(it.id) === f.q.trim() || qWords.every(w => it.lname?.includes(w))));
-		list($("#results", el), "browse", res, ["item", "req", "av", "cur", "a7", "a30", "vs30", "wk", "de", "last"], { onChange: sync });
+		list($("#results", el), "browse", res, ["item", "req", "ilvl", "av", "cur", "a7", "a30", "vs30", "wk", "de", "last"], { onChange: sync });
 	}
 	function sync() {
 		const p = new URLSearchParams();
@@ -364,7 +370,7 @@ async function browse(el, params) {
 	let timer;
 	form.oninput = () => {
 		const fd = new FormData(form);
-		for (const k of ["q", "lmin", "lmax", "qmin", "pmin", "pmax"]) f[k] = fd.get(k) || "";
+		for (const k of ["q", "lmin", "lmax", "imin", "imax", "qmin", "pmin", "pmax"]) f[k] = fd.get(k) || "";
 		f.now = fd.get("now") === "on";
 		clearTimeout(timer);
 		timer = setTimeout(() => { st.page = 0; sync(); apply(); }, 120);
