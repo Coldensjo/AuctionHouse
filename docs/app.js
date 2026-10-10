@@ -138,7 +138,9 @@ const icon = (it, size = "") => `<span class="ic ${size} q${it.q}"><img loading=
 const itemLink = (it, size = "") => `<a class="iname q${it.q}" href="${href("item", it.id)}" data-tip="${it.id}">${icon(it, size)}<span class="nm">${esc(it.name)}</span></a>`;
 const TIME_LEFT = ["", "Short", "Medium", "Long", "Very Long"];
 const TIME_LEFT_TITLE = ["", "Under 30 minutes", "30 minutes to 2 hours", "2 to 8 hours", "8 to 24 hours"];
-const timeLeft = tl => `<span title="${TIME_LEFT_TITLE[tl] || ""}">${TIME_LEFT[tl] || "-"}</span>`;
+const TIME_LEFT_MODERN = ["", "Under 30 minutes", "30 minutes to 2 hours", "2 to 12 hours", "12 to 48 hours"];
+// 1-4: classic auction house, 11-14: modern auction house (wider bands)
+const timeLeft = tl => `<span title="${(tl > 10 ? TIME_LEFT_MODERN : TIME_LEFT_TITLE)[tl % 10] || ""}">${TIME_LEFT[tl % 10] || "-"}</span>`;
 const sellerLink = name => (name ? `<a class="seller" href="${href("seller", name)}">${esc(name)}</a>` : `<span class="muted">Unknown</span>`);
 const SALES_NOTE = "Estimated by comparing full scans: an auction that is gone while it still had time left was most likely bought (unless the seller listed the item again, then it was cancelled). Auctions listed and bought between two scans are never seen, so more scans give better numbers.";
 const className = it => (S.items.classes[it.c] || "Unknown");

@@ -123,7 +123,7 @@ def read_sync_scans(cfg):
 					items[f[0]] = [int(x) for x in f[1:]]
 			if items:
 				full = bool(s.get("full")) or len(items) >= FULL_SCAN_MIN_ITEMS
-				auctions = sales.parse(luasv.text(s.get("auc")), luasv.text(s.get("owners"))) if s.get("auc") else None
+				auctions = sales.parse(luasv.text(s.get("auc")), luasv.text(s.get("owners")), luasv.text(s.get("ah"))) if s.get("auc") else None
 				yield luasv.text(s.get("realm")) or "", int(s["t"]), full, luasv.text(s.get("faction")) or "", items, auctions or None
 
 def read_disenchant_buckets(cfg):

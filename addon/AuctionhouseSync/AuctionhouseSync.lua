@@ -3,8 +3,9 @@ AuctionhouseSync
 ----------------
 Records full auction house scans for the auction house website.
 
-	* A Scan button on the auction house window (or /ahsync scan) runs a full scan: one "get all"
-	  request (allowed every 15 minutes), then every auction is read: item, stack size, buyout,
+	* A Scan button on the auction house window (or /ahsync scan) runs a full scan: one "replicate"
+	  request on the modern auction house, "get all" on the classic one (allowed every 15 minutes),
+	  then every auction is read: item, stack size, buyout,
 	  current bid, time left and seller. Seller names the client has not loaded yet are read again
 	  a few seconds later.
 	* Per item the scan keeps the lowest unit price, quantity listed, number of auctions and median
@@ -43,6 +44,29 @@ local button
 
 local function Print(msg)
 	print("|cff33ff99Auctionhouse Sync|r: " .. msg)
+end
+
+-- The modern auction house (C_AuctionHouse, full scan = "replicate") or the classic one (full scan = "get all" query)
+local MODERN = C_AuctionHouse ~= nil and C_AuctionHouse.ReplicateItems ~= nil
+local LIST_EVENT = MODERN and "REPLICATE_ITEM_LIST_UPDATE" or "AUCTION_ITEM_LIST_UPDATE"
+
+local function NumAuctions()
+	if MODERN then return C_AuctionHouse.GetNumReplicateItems() or 0 end
+	return GetNumAuctionItems("list")
+end
+
+-- itemID, count, buyout, bid, seller, timeLeft (1 short .. 4 very long), hasAllInfo of auction i (from 1)
+local function AuctionInfo(i)
+	local _, count, buyout, bid, owner, ownerFull, itemID, hasAll, timeLeft
+	if MODERN then
+		_, _, count, _, _, _, _, _, _, buyout, bid, _, _, owner, ownerFull, _, itemID, hasAll = C_AuctionHouse.GetReplicateItemInfo(i - 1)
+		timeLeft = C_AuctionHouse.GetReplicateItemTimeLeft(i - 1)
+		timeLeft = timeLeft and timeLeft + 1 -- Enum.AuctionHouseTimeLeftBand starts at 0
+	else
+		_, _, count, _, _, _, _, _, _, buyout, bid, _, _, owner, ownerFull, _, itemID, hasAll = GetAuctionItemInfo("list", i)
+		timeLeft = GetAuctionItemTimeLeft("list", i)
+	end
+	return itemID, count, buyout, bid, ownerFull or owner, timeLeft, hasAll
 end
 
 local function RealmKey()
@@ -107,21 +131,23 @@ StaticPopupDialogs["AUCTIONHOUSESYNC_RELOAD"] = {
 -- Reading the auction list
 -- ---------------------------------------------------------------------------
 
--- Reads every auction in the "list" view (a full scan result stays there until the next search).
+-- Reads every auction of the last full scan (the result stays available until the next one or search).
 -- done(list, total) with list[i] = {itemID, count, buyout, seller or nil, timeLeft, bid}, or done(nil)
 -- when the auction house closed or the list changed meanwhile.
 local function ReadAuctions(done, progress)
-	local total = GetNumAuctionItems("list")
+	local total = NumAuctions()
 	if not ahOpen or total == 0 then return done(nil) end
 	local list = {}
 	local function changed()
-		return not ahOpen or GetNumAuctionItems("list") ~= total
+		return not ahOpen or NumAuctions() ~= total
 	end
 	local function read(i)
-		local _, _, count, _, _, _, _, _, _, buyout, bid, _, _, owner, ownerFull, _, itemID = GetAuctionItemInfo("list", i)
+		local itemID, count, buyout, bid, owner, timeLeft, hasAll = AuctionInfo(i)
 		if itemID and itemID > 0 then
-			owner = ownerFull or owner
-			list[i] = { itemID, count or 1, buyout or 0, owner ~= "" and owner or nil, GetAuctionItemTimeLeft("list", i) or 0, bid or 0 }
+			if owner == "" then owner = nil end
+			list[i] = { itemID, count or 1, buyout or 0, owner, timeLeft or 0, bid or 0 }
+			-- the seller is often only filled in once the client has the item's data
+			if not owner and not hasAll and C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, itemID) end
 		end
 	end
 	local function missing()
@@ -188,6 +214,7 @@ local function RecordAuctions(list, total, src)
 	local scan = {
 		t = time(), realm = RealmKey(), faction = UnitFactionGroup("player"), full = true, n = n, data = data,
 		auc = table.concat(parts, ","), owners = table.concat(owners, ","), na = #parts, src = src,
+		ah = MODERN and "modern" or "classic", -- the time left bands differ
 	}
 	table.insert(db.scans, scan)
 	Prune()
@@ -207,7 +234,13 @@ local function FeedAuctionator(byItem)
 	local ok, err = pcall(database.ProcessScan, database, itemIndexes)
 	feeding = false
 	if not ok then Print("could not update Auctionator's prices: " .. tostring(err)) end
-	pcall(function() Auctionator.SavedState.TimeOfLastGetAllScan = db.lastGetAll end)
+	pcall(function()
+		if MODERN then
+			Auctionator.SavedState.TimeOfLastReplicateScan = db.lastGetAll
+		else
+			Auctionator.SavedState.TimeOfLastGetAllScan = db.lastGetAll
+		end
+	end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -216,8 +249,20 @@ end
 
 local scanFrame = CreateFrame("Frame")
 
+-- Seconds until the next full scan is allowed (ours or Auctionator's, whichever was last)
 local function Cooldown()
-	return math.max(0, (db.lastGetAll or 0) + GETALL_COOLDOWN - time())
+	local last = db.lastGetAll or 0
+	local state = Auctionator and Auctionator.SavedState
+	if state then
+		last = math.max(last, (MODERN and state.TimeOfLastReplicateScan or state.TimeOfLastGetAllScan) or 0)
+	end
+	return math.max(0, last + GETALL_COOLDOWN - time())
+end
+
+local function CanScan()
+	if MODERN then return Cooldown() == 0 end -- the modern API does not tell
+	local _, canGetAll = CanSendAuctionQuery()
+	return canGetAll
 end
 
 local function UpdateButton(text)
@@ -227,8 +272,7 @@ local function UpdateButton(text)
 		button:Disable()
 		return
 	end
-	local _, canGetAll = CanSendAuctionQuery()
-	if canGetAll then
+	if CanScan() then
 		button:SetText("Full Scan")
 		button:Enable()
 	else
@@ -239,7 +283,7 @@ local function UpdateButton(text)
 end
 
 local function Unmute()
-	scanFrame:UnregisterEvent("AUCTION_ITEM_LIST_UPDATE")
+	scanFrame:UnregisterEvent(LIST_EVENT)
 	for _, f in ipairs(mutedFrames or {}) do f:RegisterEvent("AUCTION_ITEM_LIST_UPDATE") end
 	mutedFrames = nil
 end
@@ -259,20 +303,28 @@ end
 local function StartScan()
 	if scanning then return Print("a scan is already running") end
 	if not ahOpen then return Print("open the auction house first") end
-	local _, canGetAll = CanSendAuctionQuery()
-	if not canGetAll then
+	if not CanScan() then
 		local left = Cooldown()
 		return Print(left > 0 and ("the next full scan is allowed in %d:%02d"):format(math.floor(left / 60), left % 60)
 			or "a full scan is not allowed right now (one every 15 minutes)")
 	end
 	scanning = true
 	db.lastGetAll = time()
-	-- other listeners (Blizzard's browse tab, Auctionator) would try to show all auctions at once
-	mutedFrames = { GetFramesRegisteredForEvent("AUCTION_ITEM_LIST_UPDATE") }
-	for _, f in ipairs(mutedFrames) do f:UnregisterEvent("AUCTION_ITEM_LIST_UPDATE") end
-	scanFrame:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
-	if not ITEM_QUALITY_COLORS[-1] then ITEM_QUALITY_COLORS[-1] = { r = 0, g = 0, b = 0 } end -- classic AH code errors without it
-	QueryAuctionItems("", nil, nil, 0, nil, nil, true, false, nil)
+	scanFrame:RegisterEvent(LIST_EVENT)
+	if MODERN then
+		C_AuctionHouse.ReplicateItems()
+	else
+		-- other listeners (Blizzard's browse tab, Auctionator) would try to show all auctions at once
+		mutedFrames = {}
+		for _, f in ipairs({ GetFramesRegisteredForEvent("AUCTION_ITEM_LIST_UPDATE") }) do
+			if f ~= scanFrame then
+				f:UnregisterEvent("AUCTION_ITEM_LIST_UPDATE")
+				mutedFrames[#mutedFrames + 1] = f
+			end
+		end
+		if not ITEM_QUALITY_COLORS[-1] then ITEM_QUALITY_COLORS[-1] = { r = 0, g = 0, b = 0 } end -- classic AH code errors without it
+		QueryAuctionItems("", nil, nil, 0, nil, nil, true, false, nil)
+	end
 	Print("full scan started, waiting for the server...")
 	UpdateButton("Waiting...")
 	local started = db.lastGetAll
@@ -285,18 +337,23 @@ local function StartScan()
 end
 
 scanFrame:SetScript("OnEvent", function(self, event)
-	if event == "AUCTION_ITEM_LIST_UPDATE" and scanning then
-		self:UnregisterEvent("AUCTION_ITEM_LIST_UPDATE")
+	if event == LIST_EVENT and scanning then
+		self:UnregisterEvent(LIST_EVENT)
 		reading = true
 		ReadAuctions(FinishScan, UpdateButton)
 	end
 end)
 
 local function CreateButton()
-	if button or not AuctionFrame then return end
-	button = CreateFrame("Button", "AuctionhouseSyncScanButton", AuctionFrame, "UIPanelButtonTemplate")
+	local parent = AuctionHouseFrame or AuctionFrame
+	if button or not parent then return end
+	button = CreateFrame("Button", "AuctionhouseSyncScanButton", parent, "UIPanelButtonTemplate")
 	button:SetSize(120, 22)
-	button:SetPoint("TOPRIGHT", AuctionFrame, "TOPRIGHT", -32, -14)
+	if parent == AuctionHouseFrame then
+		button:SetPoint("TOPRIGHT", parent, "BOTTOMRIGHT", -4, -2) -- below the frame, right of the tabs
+	else
+		button:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -32, -14)
+	end
 	button:SetScript("OnClick", StartScan)
 	button:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
@@ -325,7 +382,8 @@ local function OnProcessScan(_, itemIndexes)
 		return
 	end
 	-- Auctionator's Full Scan: read the auctions it got, with sellers
-	db.lastGetAll = Auctionator.SavedState and Auctionator.SavedState.TimeOfLastGetAllScan or time()
+	local state = Auctionator.SavedState
+	db.lastGetAll = state and (MODERN and state.TimeOfLastReplicateScan or state.TimeOfLastGetAllScan) or time()
 	ReadAuctions(function(list, total)
 		if list then
 			RecordAuctions(list, total, "auctionator")

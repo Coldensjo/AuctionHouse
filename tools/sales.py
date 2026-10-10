@@ -26,19 +26,24 @@ from collections import defaultdict
 
 AUCTION_KEEP_DAYS = 3 # auction lists are big; only needed until the next scan has been compared
 MAX_GAP = 24 * 3600 # scans further apart are not compared (everything could have expired)
-# time left codes: (shortest, longest) remaining seconds
-TIME_LEFT = {1: (0, 1800), 2: (1800, 7200), 3: (7200, 28800), 4: (28800, 86400)}
+# time left codes: (shortest, longest) remaining seconds. 1-4: classic auction house (short, medium, long,
+# very long); 11-14: the same on the modern auction house, whose long and very long bands are wider.
+TIME_LEFT = {1: (0, 1800), 2: (1800, 7200), 3: (7200, 28800), 4: (28800, 86400),
+	11: (0, 1800), 12: (1800, 7200), 13: (7200, 43200), 14: (43200, 172800)}
 
-def parse(auc, owners):
-	"""The addon's "id:count:buyout:seller:timeLeft:bid,..." into [[id, count, buyout, seller, timeLeft, bid]]."""
+def parse(auc, owners, ah=None):
+	"""The addon's "id:count:buyout:seller:timeLeft:bid,..." into [[id, count, buyout, seller, timeLeft, bid]].
+	ah: "modern" for the modern auction house (time left stored as 11-14)."""
 	names = owners.split(",") if owners else []
+	tl_base = 10 if ah == "modern" else 0
 	out = []
 	for part in (auc or "").split(","):
 		f = part.split(":")
 		if len(f) != 6 or not all(x.isdigit() for x in f):
 			continue
 		o = int(f[3])
-		out.append([int(f[0]), int(f[1]), int(f[2]), names[o - 1] if 0 < o <= len(names) else "", int(f[4]), int(f[5])])
+		tl = int(f[4])
+		out.append([int(f[0]), int(f[1]), int(f[2]), names[o - 1] if 0 < o <= len(names) else "", tl + tl_base if tl else 0, int(f[5])])
 	return out
 
 def still_running(time_left, dt):
