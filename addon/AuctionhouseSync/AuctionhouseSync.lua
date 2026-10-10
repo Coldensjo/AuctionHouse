@@ -23,6 +23,7 @@ Records full auction house scans for the auction house website.
 /ahsync scan     full scan (auction house window open)
 /ahsync sellers  start, pause or resume the seller scan (modern auction house)
 /ahsync popup    toggle the reload popup after full scans
+/ahsync resetbuttons  put the (draggable) buttons back in their default place
 /ahsync clear    forget stored scans
 ]]
 
@@ -515,36 +516,60 @@ scanFrame:SetScript("OnEvent", function(self, event)
 	end
 end)
 
+-- The buttons sit together in a holder that can be dragged anywhere (the position is remembered)
+local holder
+
+local function PlaceButtons()
+	local parent = holder:GetParent()
+	holder:ClearAllPoints()
+	if db.buttonPos then
+		holder:SetPoint("TOPLEFT", parent, "TOPLEFT", db.buttonPos[1], db.buttonPos[2])
+	elseif parent == AuctionHouseFrame then
+		holder:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -26, -1) -- the title bar, left of the close button
+	else
+		holder:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -32, -14)
+	end
+end
+
+local function MakeButton(name, width, onClick, title, text)
+	local b = CreateFrame("Button", name, holder, "UIPanelButtonTemplate")
+	b:SetSize(width, 22)
+	b:SetScript("OnClick", onClick)
+	b:RegisterForDrag("LeftButton")
+	b:SetScript("OnDragStart", function() holder:StartMoving() end)
+	b:SetScript("OnDragStop", function()
+		holder:StopMovingOrSizing()
+		local parent = holder:GetParent()
+		db.buttonPos = { math.floor(holder:GetLeft() - parent:GetLeft() + 0.5), math.floor(holder:GetTop() - parent:GetTop() + 0.5) }
+		PlaceButtons()
+	end)
+	b:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+		GameTooltip:SetText(title)
+		GameTooltip:AddLine(text, 1, 1, 1, true)
+		GameTooltip:AddLine("Drag to move the buttons. /ahsync resetbuttons puts them back.", 0.6, 0.6, 0.6, true)
+		GameTooltip:Show()
+	end)
+	b:SetScript("OnLeave", GameTooltip_Hide)
+	return b
+end
+
 local function CreateButton()
 	local parent = AuctionHouseFrame or AuctionFrame
 	if button or not parent then return end
-	button = CreateFrame("Button", "AuctionhouseSyncScanButton", parent, "UIPanelButtonTemplate")
-	button:SetSize(120, 22)
-	if parent == AuctionHouseFrame then
-		button:SetPoint("TOPRIGHT", parent, "BOTTOMRIGHT", -4, -2) -- below the frame, right of the tabs
-	else
-		button:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -32, -14)
-	end
-	button:SetScript("OnClick", StartScan)
-	button:SetScript("OnEnter", function(self)
-		GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-		GameTooltip:SetText("Auctionhouse Sync")
-		GameTooltip:AddLine("Scans every auction, with sellers, for the auction house website. Allowed once every 15 minutes.", 1, 1, 1, true)
-		GameTooltip:Show()
-	end)
-	button:SetScript("OnLeave", GameTooltip_Hide)
+	holder = CreateFrame("Frame", "AuctionhouseSyncButtons", parent)
+	holder:SetSize(MODERN and 254 or 120, 22)
+	holder:SetMovable(true)
+	holder:SetClampedToScreen(true)
+	holder:SetFrameStrata("HIGH")
+	PlaceButtons()
+	button = MakeButton("AuctionhouseSyncScanButton", 120, StartScan, "Auctionhouse Sync",
+		"Scans every auction for the auction house website. Allowed once every 15 minutes.")
+	button:SetPoint("RIGHT", holder, "RIGHT")
 	if MODERN then
-		crawlButton = CreateFrame("Button", "AuctionhouseSyncSellersButton", parent, "UIPanelButtonTemplate")
-		crawlButton:SetSize(130, 22)
+		crawlButton = MakeButton("AuctionhouseSyncSellersButton", 130, CrawlStart, "Scan Sellers",
+			"The full scan does not include other players' names. This searches every item one by one to find who sells what. Slow (the server limits searches): it runs while the auction house is open and can be paused and resumed.")
 		crawlButton:SetPoint("RIGHT", button, "LEFT", -4, 0)
-		crawlButton:SetScript("OnClick", CrawlStart)
-		crawlButton:SetScript("OnEnter", function(self)
-			GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-			GameTooltip:SetText("Scan Sellers")
-			GameTooltip:AddLine("The full scan does not include other players' names. This searches every item one by one to find who sells what. Slow (the server limits searches): it runs while the auction house is open and can be paused and resumed.", 1, 1, 1, true)
-			GameTooltip:Show()
-		end)
-		crawlButton:SetScript("OnLeave", GameTooltip_Hide)
 	end
 	C_Timer.NewTicker(1, function()
 		if ahOpen then UpdateButton() end
@@ -632,6 +657,10 @@ SlashCmdList["AUCTIONHOUSESYNC"] = function(msg)
 		StartScan()
 	elseif cmd == "sellers" then
 		CrawlStart()
+	elseif cmd == "resetbuttons" then
+		db.buttonPos = nil
+		if holder then PlaceButtons() end
+		Print("buttons moved back to their default place")
 	elseif cmd == "popup" then
 		db.popup = not db.popup
 		Print("reload popup after full scans: " .. (db.popup and "on" or "off"))
