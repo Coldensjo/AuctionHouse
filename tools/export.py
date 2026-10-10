@@ -28,6 +28,7 @@ VENDORS_FILE = os.path.join(STATE, "vendors.json")
 ZONES_FILE = os.path.join(HERE, "zones.json")
 SHARDS = 32 # history and tooltip files are split by itemID % SHARDS so the site loads small pieces
 SNAPSHOT_DAYS = 90 # days that can be compared on the market page (every kept scan can be)
+FULL_SCAN_MIN_ITEMS = 1000 # a stored scan this big is a full scan even when the addon did not flag it (searches cover a few items)
 SCAN_DAY_0 = datetime.datetime(2020, 1, 1).timestamp() # Auctionator's day 0 (local midnight)
 
 DEFAULT_CONFIG = {
@@ -119,7 +120,8 @@ def read_sync_scans(cfg):
 				if len(f) == 5 and all(x.lstrip("-").isdigit() for x in f):
 					items[f[0]] = [int(x) for x in f[1:]]
 			if items:
-				yield luasv.text(s.get("realm")) or "", int(s["t"]), bool(s.get("full")), luasv.text(s.get("faction")) or "", items
+				full = bool(s.get("full")) or len(items) >= FULL_SCAN_MIN_ITEMS
+				yield luasv.text(s.get("realm")) or "", int(s["t"]), full, luasv.text(s.get("faction")) or "", items
 
 def read_disenchant_buckets(cfg):
 	"""Learned disenchant results from the DisenchantValue addon, merged over all accounts."""

@@ -19,6 +19,7 @@ separately so the auction house website can show more than one scan a day:
 local ADDON = ...
 local MAX_SCANS = 60 -- kept in the saved variables until the sync program has had a chance to read them
 local MAX_AGE = 4 * 86400
+local FULL_SCAN_MIN_ITEMS = 1000 -- searches cover a few items, a full scan thousands
 
 local db
 local pending -- the newest snapshot, flagged full when Auctionator reports its full scan complete
@@ -104,12 +105,14 @@ local function OnProcessScan(database, itemIndexes)
 	if type(itemIndexes) ~= "table" then return end
 	local data, count = Summarize(itemIndexes)
 	if count == 0 then return end
-	pending = { t = time(), realm = RealmKey(), faction = UnitFactionGroup("player"), full = false, n = count, data = data }
+	local stack = debugstack(2) or ""
+	pending = { t = time(), realm = RealmKey(), faction = UnitFactionGroup("player"), full = false, n = count, data = data,
+		src = stack:match("Auctionator[/\\]([^\"%]:]-%.lua)") }
 	table.insert(db.scans, pending)
 	Prune()
 	-- Auctionator's scan complete event does not always reach us, so a scan processed from
-	-- Auctionator's full scan code counts as a full scan too
-	if (debugstack(2) or ""):find("FullScan") then
+	-- Auctionator's full scan code, or one too big to be a search, counts as a full scan too
+	if count >= FULL_SCAN_MIN_ITEMS or stack:find("FullScan") then
 		FullScanDoneWhenProcessed(database)
 	end
 end
