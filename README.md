@@ -6,8 +6,10 @@ A World of Warcraft Classic styled website for your Auctionator scan data, hoste
 
 1. Run **`install-autostart.bat`** once. The sync program then runs hidden every time you log in to Windows.
    It also installs the **AuctionhouseSync** addon into WoW, so restart WoW or `/reload` once afterwards.
-2. Scan the auction house with Auctionator as usual. When a full scan finishes, the addon asks
-   **Reload & Upload**. Click it, and the scan is on the website a minute or two later.
+2. Open the auction house and click **Full Scan** (top right of the auction house window, or `/ahsync scan`).
+   It reads every auction with its seller, and also updates Auctionator's prices. A full scan is allowed
+   once every 15 minutes. When it finishes, the addon asks **Reload & Upload**. Click it, and the scan is on
+   the website a minute or two later. (Auctionator's own Full Scan button works too.)
 
 WoW only writes addon data to disk on `/reload`, logout or exit, so that is when a scan can be uploaded.
 If you click **Later**, the scan is kept and uploaded on your next reload, logout or exit.
@@ -20,19 +22,22 @@ If you click **Later**, the scan is kept and uploaded on your next reload, logou
 | `upload.bat` | Export and upload once |
 | `preview.bat` | Export without uploading and open the site locally |
 
-The sync log is `state/sync.log`. In game, `/ahsync` shows how many scans are stored, `/ahsync popup`
-turns the reload question on or off.
+The sync log is `state/sync.log`. In game, `/ahsync` shows how many scans are stored, `/ahsync scan` runs a
+full scan, `/ahsync popup` turns the reload question on or off.
 
 ## What the site shows
 
 - **Browse**: the Classic auction house browser. Category tree, name, level, rarity and price filters, sortable columns.
-- **Item pages**: current price, auctions and median in the latest scan, 3/7/14/30 day and all-time averages,
+- **Item pages**: current price, auctions and median in the latest scan, every current auction with its seller,
+  estimated sales (sold per day, sell-through, sale price), 3/7/14/30 day and all-time averages,
   lowest and highest ever, volatility, price history per scan and per day, best time of day and best weekday
   to buy and sell, every scan and every day in tables, disenchant breakdown (era table and your own results
   from DisenchantValue), vendor prices and vendors, and your own postings.
-- **Market**: items, listings, auctions, market value and a price index per scan and per day, recent scans,
-  a category breakdown, the biggest risers and fallers, the most listed, valuable, expensive and volatile
+- **Market**: items, listings, auctions, market value, a price index and estimated sales per scan and per day, recent scans,
+  a category breakdown, best sellers, the biggest risers and fallers, the most listed, valuable, expensive and volatile
   items, and items new to or gone from the market.
+- **Sellers**: everyone with auctions, their listed value and estimated sales. A page per seller shows what they
+  list now, every item they have listed, their auctions per scan and their estimated sales.
 - **Deals**: items listed below their 30 day average.
 - **Disenchant**: items worth more disenchanted than their buyout, enchanting material prices, and value per item level.
 - **Vendor Flips**: items listed below vendor price, and vendor items listed above vendor price.
@@ -46,6 +51,13 @@ Hover any item for its in-game tooltip with auction, average, disenchant and ven
 - Auctionator keeps one low/high price and quantity per item per day, for 21 days. The **AuctionhouseSync**
   addon (`addon/`) hooks Auctionator's scan processing and records every scan with its time and, per item,
   the lowest price, quantity, number of auctions and median price.
+- A full scan also stores every auction (item, stack, buyout, bid, time left, seller). `tools/sales.py` compares
+  each scan with the one before from the same auction house: an auction that is gone while it still had time
+  left was most likely bought, unless its seller listed the item again (cancelled). The time left decides how
+  likely, and a gone auction with a bid that may have expired went to the bidder. Auctions listed and bought
+  between two scans are never seen, so the estimates are a lower bound and get better with more scans.
+  Auction lists are kept for 3 days in `state/archive/<realm>/auctions/`; the estimates (`sales.json`) and
+  what each seller listed (`sellers.json`) are kept.
 - `tools/sync.py` watches WoW's saved variables and runs `tools/export.py` whenever they change.
 - `tools/export.py` reads `WTF/Account/*/SavedVariables/` for every account and merges everything into
   `state/archive/<realm>/`. `daily.json` keeps every day forever. `scans/<day>.json` keeps per-scan detail for

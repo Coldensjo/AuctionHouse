@@ -136,6 +136,11 @@ function timeAgo(ts) {
 }
 const icon = (it, size = "") => `<span class="ic ${size} q${it.q}"><img loading="lazy" src="icons/${esc(it.icon)}.jpg" alt="" onerror="this.onerror=null;this.src='icons/inv_misc_questionmark.jpg'"></span>`;
 const itemLink = (it, size = "") => `<a class="iname q${it.q}" href="${href("item", it.id)}" data-tip="${it.id}">${icon(it, size)}<span class="nm">${esc(it.name)}</span></a>`;
+const TIME_LEFT = ["", "Short", "Medium", "Long", "Very Long"];
+const TIME_LEFT_TITLE = ["", "Under 30 minutes", "30 minutes to 2 hours", "2 to 8 hours", "8 to 24 hours"];
+const timeLeft = tl => `<span title="${TIME_LEFT_TITLE[tl] || ""}">${TIME_LEFT[tl] || "-"}</span>`;
+const sellerLink = name => (name ? `<a class="seller" href="${href("seller", name)}">${esc(name)}</a>` : `<span class="muted">Unknown</span>`);
+const SALES_NOTE = "Estimated by comparing full scans: an auction that is gone while it still had time left was most likely bought (unless the seller listed the item again, then it was cancelled). Auctions listed and bought between two scans are never seen, so more scans give better numbers.";
 const className = it => (S.items.classes[it.c] || "Unknown");
 const subName = it => S.items.subclasses[`${it.c}:${it.s}`] || "";
 
@@ -156,7 +161,7 @@ function href(view, arg, params) {
 	return `#/${S.realm.slug}/${view}${arg != null ? "/" + encodeURIComponent(arg) : ""}${qs}`;
 }
 
-const VIEWS = { browse, item: itemView, market, deals, disenchant, flips, recipes };
+const VIEWS = { browse, item: itemView, market, sellers, seller: sellerView, deals, disenchant, flips, recipes };
 let routeToken = 0;
 async function route() {
 	const { realm, view, arg, params } = parseHash();
@@ -164,7 +169,7 @@ async function route() {
 	S.realm = realm;
 	$("#realm").value = realm.slug;
 	$("#scan-info").innerHTML = `Last scan <b>${timeAgo(realm.lastScan)}</b><br>${realm.items.toLocaleString()} items &middot; ${realm.days} days${realm.scans ? ` &middot; ${realm.scans} scans` : ""} of history`;
-	const tab = view === "item" ? null : view;
+	const tab = view === "item" ? null : view === "seller" ? "sellers" : view;
 	$$("#tabs a").forEach(a => {
 		a.classList.toggle("on", a.dataset.view === tab);
 		a.href = href(a.dataset.view);
@@ -213,12 +218,17 @@ const COLS = {
 	value: { label: "Listed Value", title: "Price x quantity available", sort: it => it.cur * it.av, cls: "r", fmt: it => money(it.cur * it.av) },
 	discount: { label: "Discount", title: "Below the 30 day average", sort: it => -it.vs30, cls: "r", fmt: it => pct(it.vs30, true) },
 	gain: { label: "Potential", title: "30 day average minus current price", sort: it => it.a30 - it.cur, cls: "r", fmt: it => money(it.a30 - it.cur) },
+	sold7: { label: "Sold 7d", title: "Estimated quantity sold in the last 7 days", sort: it => it.sold7, cls: "r", fmt: it => num(it.sold7) },
+	sv7: { label: "Sales 7d", title: "Estimated value sold in the last 7 days", sort: it => it.sv7, cls: "r", fmt: it => money(it.sv7) },
+	spd: { label: "Sold/Day", title: "Estimated quantity sold per day (last 30 days, scaled to the hours the scans covered)", sort: it => it.spd, cls: "r", fmt: it => (it.spd == null ? num(null) : it.spd.toFixed(it.spd < 10 ? 1 : 0)) },
+	st: { label: "Sell-through", title: "Share of auctions that left the auction house by being bought (last 30 days, estimated)", sort: it => it.st, cls: "r", fmt: it => (it.st == null ? num(null) : it.st + "%") },
+	sp: { label: "Sale Price", title: "Average estimated sale price per item (last 30 days)", sort: it => it.sp, cls: "r", fmt: it => money(it.sp) },
 };
 
 // Fixed column widths, so sorting or a very long price never shifts the columns. The item column takes the rest.
-const MONEY_COLS = new Set(["med", "cur", "a7", "a30", "all", "min", "max", "de", "deProfit", "sell", "flip", "value", "gain", "vprice", "vdiff", "buy", "price", "total"]);
+const MONEY_COLS = new Set(["med", "cur", "a7", "a30", "all", "min", "max", "de", "deProfit", "sell", "flip", "value", "gain", "vprice", "vdiff", "buy", "price", "total", "sv7", "sp"]);
 const PCT_COLS = new Set(["vs30", "wk", "chg", "discount", "vmargin", "markup", "vsnow"]);
-const COL_WIDTHS = { item: 0, req: 44, ilvl: 50, av: 64, n: 74, seen: 56, last: 96, vol: 84, prof: 116, npcs: 270, posted: 176, qty: 52 };
+const COL_WIDTHS = { item: 0, req: 44, ilvl: 50, av: 64, n: 74, seen: 56, last: 96, vol: 84, prof: 116, npcs: 270, posted: 176, qty: 52, sold7: 76, spd: 80, st: 96 };
 function colWidth(c) {
 	if (c in COL_WIDTHS) return COL_WIDTHS[c];
 	if (MONEY_COLS.has(c)) return 132;
@@ -250,7 +260,7 @@ function list(el, key, data, cols, opts = {}) {
 		return `<th class="${cls}" data-sort="${c}" title="${esc(d.title || "")}">${d.label}</th>`;
 	}).join("");
 	const body = rows.length
-		? rows.map(it => `<tr data-id="${it.id}">${cols.map(c => `<td class="${COLS[c].cls}">${COLS[c].fmt(it)}</td>`).join("")}</tr>`).join("")
+		? rows.map(it => `<tr data-id="${it.id}"${opts.rowHref ? ` data-href="${esc(opts.rowHref(it))}"` : ""}>${cols.map(c => `<td class="${COLS[c].cls}">${COLS[c].fmt(it)}</td>`).join("")}</tr>`).join("")
 		: `<tr class="empty"><td colspan="${cols.length}">${opts.empty || "No items match."}</td></tr>`;
 	const pager = opts.noPager ? "" : `<div class="pager"><span>${sorted.length ? `Items ${(st.page * size + 1).toLocaleString()}-${Math.min(sorted.length, (st.page + 1) * size).toLocaleString()} of ${sorted.length.toLocaleString()}` : ""}</span>
 		<span class="seg"><button class="btn small" data-page="-1" ${st.page ? "" : "disabled"}>&lt; Prev</button>
@@ -276,7 +286,7 @@ function list(el, key, data, cols, opts = {}) {
 			return;
 		}
 		const tr = e.target.closest("tr[data-id]");
-		if (tr && !e.target.closest("a")) location.hash = href("item", tr.dataset.id);
+		if (tr && !e.target.closest("a")) location.hash = tr.dataset.href || href("item", tr.dataset.id);
 	};
 }
 
@@ -453,6 +463,9 @@ async function itemView(el, params, arg, token) {
 	// scan rows: [time, lowest, quantity, auctions, median]
 	const scans = hist.s.map(([t, low, qty, n, med]) => ({ t, low, qty, n, med }));
 	const hours = new Set(scans.map(p => new Date(p.t * 1000).getHours()));
+	// estimated sales per day [day, units, value, auctions bought, auctions gone]; current auctions [seller, qty, buyout, timeLeft, bid]
+	const sales = (hist.sl || []).map(([d, units, value, bought, gone]) => ({ d, units, value, bought, gone }));
+	const auctions = hist.a || [];
 
 	el.innerHTML = `
 		<div class="item-head">
@@ -472,6 +485,7 @@ async function itemView(el, params, arg, token) {
 			${card("Lowest Ever", money(it.min), `<span class="muted">highest</span> ${money(it.max)}`)}
 			${card("Available", num(it.av), it.n ? `<span class="muted">in</span> ${num(it.n)} <span class="muted">auctions</span>` : `<span class="muted">avg</span> ${num(it.avAvg)} <span class="muted">listed</span>`)}
 			${card("Seen", `${it.seen} <span class="muted" style="font-size:13px">days</span>`, `${seenAgo(it)}${it.pts ? ` <span class="muted">&middot; ${it.pts} scans</span>` : ""}`)}
+			${it.spd != null ? card("Est. Sold / Day", it.spd.toFixed(it.spd < 10 ? 1 : 0), it.st != null ? `${it.st}% <span class="muted">sell-through</span>` : `<span class="muted">estimated</span>`) : ""}
 		</div>
 		<div class="item-grid">
 			<div class="stack">
@@ -514,6 +528,18 @@ async function itemView(el, params, arg, token) {
 					<div class="chart" id="chart"></div>
 					<div class="legend" id="legend"></div>
 				</div>
+				${sales.length ? `<div class="box"><h3>Estimated Sales</h3>
+					<div class="kv" style="margin-bottom:10px">
+						<span>Sold, last 7 days</span><span>${num(it.sold7)} <span class="muted">for</span> ${money(it.sv7)}</span>
+						<span>Sold per day (30 days)</span><span>${it.spd != null ? it.spd.toFixed(1) : "-"}</span>
+						<span>Average sale price</span><span>${money(it.sp)}${it.sp && it.a30 ? ` <span class="muted">(${pct((it.sp / it.a30 - 1) * 100)} vs 30d avg)</span>` : ""}</span>
+						<span>Sell-through</span><span>${it.st != null ? it.st + "%" : "-"}</span>
+					</div>
+					${sales.some(p => p.units > 0) ? `<div class="chart short" id="sales"></div>` : ""}<p class="note">${SALES_NOTE}</p></div>` : ""}
+				${auctions.length ? `<div class="box"><h3>Current Auctions <span class="muted" style="font-size:13px">(${auctions.length}${auctions.length >= 100 ? "+" : ""} &middot; ${new Set(auctions.map(a => a[0]).filter(Boolean)).size} sellers)</span></h3>
+					<div class="tbl-wrap" style="max-height:360px;overflow:auto"><table class="list"><thead><tr><th class="nosort">Seller</th><th class="r nosort">Qty</th><th class="r nosort">Each</th><th class="r nosort">Buyout</th><th class="r nosort">Bid</th><th class="nosort">Time Left</th></tr></thead><tbody>
+					${auctions.map(([who, qty, buyout, tl, bid]) => `<tr><td>${sellerLink(who)}</td><td class="r">${qty}</td><td class="r">${buyout ? money(Math.ceil(buyout / qty)) : num(null)}</td><td class="r">${buyout ? money(buyout) : num(null)}</td><td class="r">${bid ? money(bid) : num(null)}</td><td>${timeLeft(tl)}</td></tr>`).join("")}
+					</tbody></table></div><p class="note">From the latest full scan with its auction list.</p></div>` : ""}
 				${hours.size >= 4 ? `<div class="box"><h3>Best Time of Day</h3><div class="chart short" id="hours"></div><p class="note">Average lowest price at each hour of the day (your local time) relative to the item's average, from ${scans.length} scans. Lower is a better time to buy, higher a better time to sell.</p></div>` : ""}
 				${all.length >= 7 ? `<div class="box"><h3>Best Day to Buy and Sell</h3><div class="chart short" id="weekday"></div><p class="note">Average price on each weekday relative to the item's overall average. Lower is a better day to buy, higher a better day to sell.</p></div>` : ""}
 				${eraT || learnedT ? `<div class="box"><h3>Disenchanting</h3>
@@ -570,6 +596,17 @@ async function itemView(el, params, arg, token) {
 	}
 	rangeEl.onclick = e => { const b = e.target.closest("[data-r]"); if (b) draw(b.dataset.r); };
 	draw(scans.length >= 2 ? "scans" : all.length > 30 ? "30" : "0");
+
+	if ($("#sales", el)) {
+		chart($("#sales", el), {
+			x: sales.map(p => p.d),
+			series: [
+				{ type: "bar", values: sales.map(p => p.units), color: "rgba(30,255,0,.45)", name: "Sold", fmt: v => (v == null ? "-" : v.toFixed(1)) },
+				{ type: "line", values: sales.map(p => (p.units >= 0.5 ? p.value / p.units : null)), color: "#ffd100", width: 2, dots: true, axis: "right", name: "Sale price", fmt: moneyText },
+			],
+			yFmt: v => v.toFixed(v < 10 ? 1 : 0), y2Fmt: moneyText,
+		});
+	}
 
 	const relBars = (box, labels, rel, name) => chart(box, {
 		labels, x: labels.map((_, i) => i),
@@ -632,6 +669,12 @@ async function market(el, params, arg, token) {
 	const when = k => (perScan ? timeLong(k) : dayLabel(k, true));
 	const last = pts[pts.length - 1] || {}, prev = pts[pts.length - 2];
 	const lastDay = days[days.length - 1] || {};
+	// estimated sales: per scan (the pair ending at that scan) or per day
+	const salesBy = new Map(perScan
+		? (M.salesScans || []).map(([t, t0, units, value, bought, gone, fresh]) => [t, { units, value, bought, gone, fresh, t0 }])
+		: (M.sales || []).map(([d, units, value, bought, gone, hours]) => [d, { units, value, bought, gone, hours }]));
+	const hasSales = salesBy.size > 0;
+	const saleOf = p => salesBy.get(p.key);
 	const now = D.list.filter(it => it.inScan);
 	const fresh = now.filter(it => it.first === D.today && it.seen === 1);
 	const gone = D.list.filter(it => it.last < D.today && it.last >= D.today - 3 && it.seen >= 2);
@@ -657,6 +700,7 @@ async function market(el, params, arg, token) {
 			${perScan ? card("Auctions", num(last.auctions), change(last.auctions, prev?.auctions)) : ""}
 			${card("Market Value", money(last.value), change(last.value, prev?.value))}
 			${card("Price Index", last.index != null ? last.index.toFixed(1) : "-", prev?.index != null ? `${pct(last.index - prev.index)} <span class="muted">points</span>` : "")}
+			${hasSales ? card("Est. Sales", money(saleOf(last)?.value), saleOf(last) ? `${num(saleOf(last).units)} <span class="muted">items sold${perScan ? " since the scan before" : ""}</span>` : `<span class="muted">no comparison</span>`) : ""}
 			${card(perScan ? "Latest Scan" : "Latest Day", `<span style="font-size:15px">${last.key ? when(last.key) : "-"}</span>`, `${num(D.list.length)} <span class="muted">items tracked</span>`)}
 		</div>
 		<div class="grid2" style="margin-bottom:14px">
@@ -664,6 +708,8 @@ async function market(el, params, arg, token) {
 			<div class="box"><h3>Price Index</h3><div class="chart short" id="c-index"></div><p class="note">Median of every item's price relative to its own average. 100 = normal, above = expensive.</p></div>
 			<div class="box"><h3>Listings</h3><div class="chart short" id="c-listings"></div></div>
 			<div class="box"><h3>Distinct Items</h3><div class="chart short" id="c-items"></div></div>
+			${hasSales ? `<div class="box"><h3>Estimated Sales Value</h3><div class="chart short" id="c-sales"></div><p class="note">${perScan ? "Bought between each scan and the one before it." : "Bought per day."} ${SALES_NOTE}</p></div>
+			<div class="box"><h3>Estimated Items Sold</h3><div class="chart short" id="c-sold"></div><p class="note">Bars: items sold. Line: share of auctions that left the auction house by being bought (sell-through).</p></div>` : ""}
 		</div>
 		<div class="box" style="margin-bottom:14px"><h3>What Changed</h3><div id="compare"></div></div>
 		<div class="box" style="margin-bottom:14px"><h3>${perScan ? "Scans" : "Days"}</h3><div id="history"></div><p class="note">Click a row to see what changed since the ${by} before it.</p></div>`}
@@ -671,6 +717,9 @@ async function market(el, params, arg, token) {
 			${clsRows.map(r => `<tr data-c="${r.c}"><td><a href="${href("browse", null, new URLSearchParams({ c: r.c }))}">${esc(S.items.classes[r.c] || "Unknown")}</a></td><td class="r">${num(r.qty)}</td><td class="r">${money(r.val)}</td><td class="bar-cell"><span class="b" style="width:${(r.val / totalVal * 100).toFixed(1)}%"></span><span>${(r.val / totalVal * 100).toFixed(1)}%</span></td></tr>`).join("")}
 		</tbody></table></div>
 		<div class="grid2">
+			${hasSales ? `<div class="box"><h3>Best Sellers (7 days)</h3><div id="l-sales"></div><p class="note">Estimated value sold.</p></div>
+			<div class="box"><h3>Most Sold (7 days)</h3><div id="l-sold"></div><p class="note">Estimated quantity sold.</p></div>
+			<div class="box"><h3>Fastest Selling</h3><div id="l-st"></div><p class="note">Highest sell-through over 30 days, items with at least 5 estimated sales.</p></div>` : ""}
 			<div class="box"><h3>Biggest Risers (7 days)</h3><div id="l-up"></div></div>
 			<div class="box"><h3>Biggest Fallers (7 days)</h3><div id="l-down"></div></div>
 			<div class="box"><h3>Most Listed</h3><div id="l-listed"></div></div>
@@ -688,6 +737,13 @@ async function market(el, params, arg, token) {
 		line("#c-index", pts.map(p => p.index), "#69ccf0", v => v?.toFixed(1));
 		line("#c-listings", pts.map(p => p.listings), "#a335ee", v => Math.round(v).toLocaleString());
 		line("#c-items", pts.map(p => p.items), "#1eff00", v => Math.round(v).toLocaleString());
+		if (hasSales) {
+			chart($("#c-sales", el), { ...axis, series: [{ type: "bar", values: pts.map(p => saleOf(p)?.value ?? null), color: "rgba(255,209,0,.55)", name: "Sold for", fmt: moneyText }], yFmt: moneyText });
+			chart($("#c-sold", el), { ...axis, series: [
+				{ type: "bar", values: pts.map(p => saleOf(p)?.units ?? null), color: "rgba(30,255,0,.45)", name: "Items sold", fmt: v => (v == null ? "-" : Math.round(v).toLocaleString()) },
+				{ type: "line", values: pts.map(p => { const x = saleOf(p); return x && x.gone ? x.bought / x.gone * 100 : null; }), color: "#69ccf0", width: 2, dots: true, axis: "right", name: "Sell-through", fmt: v => (v == null ? "-" : v.toFixed(0) + "%") },
+			], yFmt: v => Math.round(v).toLocaleString(), y2Fmt: v => v.toFixed(0) + "%" });
+		}
 
 		// history: newest first; a row opens the comparison with the point before it
 		const rows = pts.slice().reverse().slice(0, 200).map((p, i, arr) => {
@@ -721,6 +777,12 @@ async function market(el, params, arg, token) {
 
 	const movers = now.filter(it => it.wk != null && it.seen >= 3 && it.a7 >= 100);
 	const top = (id, key, data, cols, sort, dir = -1) => list($(id, el), "m:" + key + S.realm.slug, data, cols, { sort, dir, pageSize: 10 });
+	if (hasSales) {
+		const selling = D.list.filter(it => it.sold7 > 0);
+		top("#l-sales", "sales", selling, ["item", "sold7", "sv7"], "sv7");
+		top("#l-sold", "sold", selling, ["item", "sold7", "sp"], "sold7");
+		top("#l-st", "st", D.list.filter(it => it.st != null && it.spd != null && it.spd * 30 >= 5), ["item", "st", "spd"], "st");
+	}
 	top("#l-up", "up", movers.filter(it => it.wk > 0), ["item", "cur", "wk"], "wk");
 	top("#l-down", "down", movers.filter(it => it.wk < 0), ["item", "cur", "wk"], "wk", 1);
 	top("#l-listed", "listed", now, ["item", "av", "cur"], "av");
@@ -798,6 +860,161 @@ async function compare(box, by, from, to, when, token) {
 	list($("#x-sold", box), key + "sold", sold, ["item", "qFrom", "qTo", "goneVal"], opts("goneVal"));
 	list($("#x-new", box), key + "new", appeared, ["item", "pTo", "qTo", "newVal"], opts("newVal"));
 }
+
+// ---------------------------------------------------------------------------
+// Sellers: who lists what (from the auction lists of full scans)
+// ---------------------------------------------------------------------------
+
+// Which sel/<n>.json a seller is in (same as seller_shard in export.py)
+function sellerShard(name) {
+	let h = 0;
+	for (const ch of name) h = (h * 31 + ch.codePointAt(0)) % 1000003;
+	return h % S.meta.shards;
+}
+function loadSellers() {
+	const slug = S.realm.slug;
+	return load("sellers:" + slug, async () => {
+		const d = await getJSON(`${slug}/sellers.json`);
+		const rows = d.rows.map(r => Object.fromEntries(d.cols.map((c, i) => [c, r[i]])));
+		rows.forEach(r => (r.id = r.name));
+		return { rows, byName: new Map(rows.map(r => [r.name, r])), lists: d.lists || [] };
+	});
+}
+async function sellerDetail(name) {
+	const key = `${S.realm.slug}/${sellerShard(name)}`;
+	const shard = await load("sel:" + key, () => getJSON(`${S.realm.slug}/sel/${sellerShard(name)}.json`));
+	return shard[name];
+}
+
+Object.assign(COLS, {
+	sName: { label: "Seller", sort: r => r.name, cls: "item", fmt: r => sellerLink(r.name) },
+	sAuctions: { label: "Auctions", title: "Auctions in the latest scan", sort: r => r.auctions, cls: "r", fmt: r => num(r.auctions) },
+	sValue: { label: "Listed Value", title: "Buyout value of their auctions in the latest scan", sort: r => r.value, cls: "r", fmt: r => money(r.value) },
+	sItems: { label: "Items", title: "Different items in the latest scan", sort: r => r.items, cls: "r", fmt: r => num(r.items) },
+	sSold: { label: "Sales 30d", title: "Estimated value sold in the last 30 days", sort: r => r.soldValue30, cls: "r", fmt: r => money(r.soldValue30) },
+	sScans: { label: "Scans", title: "Scans they had auctions in", sort: r => r.scans, cls: "r", fmt: r => num(r.scans) },
+	sLast: { label: "Last Seen", sort: r => r.last, cls: "r", fmt: r => (r.last ? timeAgo(r.last) : num(null)) },
+	aQty: { label: "Qty", sort: r => r.qty, cls: "r", fmt: r => r.qty },
+	aEach: { label: "Each", sort: r => r.each, cls: "r", fmt: r => money(r.each) },
+	aBuyout: { label: "Buyout", sort: r => r.buyout, cls: "r", fmt: r => (r.buyout ? money(r.buyout) : num(null)) },
+	aBid: { label: "Bid", sort: r => r.bid, cls: "r", fmt: r => (r.bid ? money(r.bid) : num(null)) },
+	aLeft: { label: "Time Left", sort: r => r.tl, cls: "", fmt: r => timeLeft(r.tl) },
+	iSeen: { label: "Scans", title: "Scans this seller listed it in", sort: r => r.timesSeen, cls: "r", fmt: r => num(r.timesSeen) },
+	iLast: { label: "Last Listed", sort: r => r.lastT, cls: "r", fmt: r => timeAgo(r.lastT) },
+	iPrice: { label: "Their Price", title: "Their last price per item", sort: r => r.lastUnit, cls: "r", fmt: r => money(r.lastUnit) },
+});
+Object.assign(COL_WIDTHS, { sName: 0, sAuctions: 84, sItems: 64, sScans: 64, sLast: 96, aQty: 52, aLeft: 90, iSeen: 64, iLast: 104 });
+for (const c of ["sValue", "sSold", "aEach", "aBuyout", "aBid", "iPrice"]) MONEY_COLS.add(c);
+
+const NO_SELLERS = `<p class="note" style="margin:0">Sellers come from full scans made with the <b>Full Scan</b> button that the AuctionhouseSync addon adds to the auction house window (or <b>/ahsync scan</b>).</p>`;
+
+async function sellers(el, params) {
+	const D = await loadSellers();
+	const card = (lbl, val, delta = "") => `<div class="card box"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="delta">${delta}</div></div>`;
+	if (!D.rows.length) {
+		el.innerHTML = `<h2>Sellers</h2><div class="box"><h3>No sellers yet</h3>${NO_SELLERS}</div>`;
+		return;
+	}
+	const active = D.rows.filter(r => r.auctions > 0);
+	const sum = (xs, f) => xs.reduce((s, r) => s + (f(r) || 0), 0);
+	const totalValue = sum(active, r => r.value) || 1;
+	const byValue = active.slice().sort((a, b) => b.value - a.value);
+	const top10 = sum(byValue.slice(0, 10), r => r.value);
+	el.innerHTML = `<h2>Sellers</h2>
+		<div class="cards" style="margin-bottom:16px">
+			${card("Sellers Now", num(active.length), `${num(D.rows.length)} <span class="muted">seen in all</span>`)}
+			${card("Auctions Now", num(sum(active, r => r.auctions)), `<span class="muted">by</span> ${num(active.length)} <span class="muted">sellers</span>`)}
+			${card("Listed Value", money(totalValue), `<span class="muted">avg</span> ${money(totalValue / (active.length || 1))} <span class="muted">per seller</span>`)}
+			${card("Top 10 Share", `${(top10 / totalValue * 100).toFixed(0)}%`, `<span class="muted">of the listed value</span>`)}
+			${byValue[0] ? card("Biggest Seller", `<span style="font-size:15px">${sellerLink(byValue[0].name)}</span>`, `${money(byValue[0].value)} <span class="muted">listed</span>`) : ""}
+		</div>
+		<div class="toolbar"><label>Find <input id="s-q" type="search" placeholder="Seller name" value="${esc(params.get("q") || "")}"></label>
+			<label class="chk"><input type="checkbox" id="s-now" ${params.get("all") ? "" : "checked"}> Only sellers in the latest scan</label><span class="grow"></span></div>
+		<div id="s-list"></div>
+		<p class="note">Listed value leaves out joke prices. Latest auction list${D.lists.length > 1 ? "s" : ""}: ${D.lists.map(([t, f]) => `${esc(f)} ${timeLong(t)}`).join(", ")}.</p>`;
+	const render = reset => {
+		const q = $("#s-q", el).value.trim().toLowerCase();
+		const rows = D.rows.filter(r => (!$("#s-now", el).checked || r.auctions > 0) && (!q || r.name.toLowerCase().includes(q)));
+		list($("#s-list", el), "sellers", rows, ["sName", "sAuctions", "sItems", "sValue", "sSold", "sScans", "sLast"],
+			{ sort: "sValue", resetPage: reset, rowHref: r => href("seller", r.name), empty: "No sellers match." });
+	};
+	$("#s-q", el).oninput = () => render(true);
+	$("#s-now", el).onchange = () => render(true);
+	render();
+}
+
+async function sellerView(el, params, arg, token) {
+	const name = arg || "";
+	const [D, info] = await Promise.all([loadSellers(), sellerDetail(name).catch(() => null)]);
+	if (token !== routeToken) return;
+	const R = S.data[S.realm.slug];
+	const row = D.byName.get(name);
+	if (!row || !info) {
+		el.innerHTML = `<div class="box">No seller called <b>${esc(name)}</b> has been seen on the ${esc(S.realm.name)} auction house.</div>`;
+		return;
+	}
+	const item = id => R.byId.get(id) || { id, ...itemMeta(id) };
+	const now = info.now.map(([id, qty, buyout, tl, bid]) => ({ ...item(id), qty, buyout, tl, bid, each: buyout ? Math.ceil(buyout / qty) : null }));
+	const items = info.items.map(([id, timesSeen, lastT, lastUnit]) => ({ ...item(id), timesSeen, lastT, lastUnit }));
+	const hist = info.hist.map(([t, auctions, value]) => ({ t, auctions, value }));
+	const sales = info.sales.map(([d, units, value, bought]) => ({ d, units, value, bought }));
+	const card = (lbl, val, delta = "") => `<div class="card box"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="delta">${delta}</div></div>`;
+	// what they list now, per category
+	const cats = {};
+	for (const a of now) {
+		const c = cats[a.c] || (cats[a.c] = { c: a.c, n: 0, value: 0 });
+		c.n++;
+		c.value += a.buyout || a.bid || 0;
+	}
+	const catRows = Object.values(cats).sort((a, b) => b.value - a.value);
+	const catTotal = catRows.reduce((s, r) => s + r.value, 0) || 1;
+	el.innerHTML = `
+		<div class="item-head">
+			<span class="ic big q1"><img src="icons/inv_misc_coin_01.jpg" alt=""></span>
+			<div><h1 class="seller-name">${esc(name)}</h1><div class="sub">Seller on ${esc(S.realm.name)} &middot; first seen ${timeLong(row.first)} &middot; last seen ${timeAgo(row.last)}</div></div>
+			<div class="links"><a class="btn" href="${href("sellers")}">All Sellers</a><a class="btn" href="javascript:history.back()">Back</a></div>
+		</div>
+		<div class="cards" style="margin-bottom:16px">
+			${card("Auctions Now", num(row.auctions), `${num(row.items)} <span class="muted">different items</span>`)}
+			${card("Listed Value", money(row.value), `<span class="muted">in the latest scan</span>`)}
+			${card("Est. Sales (30d)", money(row.soldValue30), `${num(row.sold30)} <span class="muted">items sold</span>`)}
+			${card("Seen In", `${num(row.scans)} <span class="muted" style="font-size:13px">scans</span>`, `${num(row.itemsEver)} <span class="muted">items listed in all</span>`)}
+		</div>
+		<div class="grid2" style="margin-bottom:14px">
+			${hist.length ? `<div class="box"><h3>Auctions per Scan</h3><div class="chart short" id="sv-hist"></div><p class="note">Bars: auctions. Line: their listed value.</p></div>` : ""}
+			${sales.length ? `<div class="box"><h3>Estimated Sales per Day</h3><div class="chart short" id="sv-sales"></div><p class="note">${SALES_NOTE}</p></div>` : ""}
+		</div>
+		<div class="box" style="margin-bottom:14px"><h3>Current Auctions</h3>${now.length ? `<div id="sv-now"></div>` : `<p class="note" style="margin:0">None in the latest scan.</p>`}</div>
+		<div class="grid2">
+			<div class="box"><h3>Items They List</h3><div id="sv-items"></div><p class="note">Every item seen in their auctions, how many scans it was in and their last price.</p></div>
+			<div class="box"><h3>What They Sell Now</h3>${catRows.length ? `<table class="list"><thead><tr><th class="nosort">Category</th><th class="r nosort">Auctions</th><th class="r nosort">Value</th><th class="nosort">Share</th></tr></thead><tbody>
+				${catRows.map(r => `<tr><td>${esc(S.items.classes[r.c] || "Unknown")}</td><td class="r">${num(r.n)}</td><td class="r">${money(r.value)}</td><td class="bar-cell"><span class="b" style="width:${(r.value / catTotal * 100).toFixed(1)}%"></span><span>${(r.value / catTotal * 100).toFixed(1)}%</span></td></tr>`).join("")}
+				</tbody></table>` : `<p class="note" style="margin:0">Nothing listed in the latest scan.</p>`}</div>
+		</div>`;
+	if (hist.length) {
+		chart($("#sv-hist", el), {
+			x: hist.map(p => p.t), unit: 3600, xLabel: timeLabel, xLong: timeLong, labelWidth: 96,
+			series: [
+				{ type: "bar", values: hist.map(p => p.auctions), color: "rgba(90,140,255,.45)", name: "Auctions", fmt: v => Math.round(v).toLocaleString() },
+				{ type: "line", values: hist.map(p => p.value), color: "#ffd100", width: 2, dots: true, axis: "right", name: "Listed value", fmt: moneyText },
+			],
+			yFmt: v => Math.round(v).toLocaleString(), y2Fmt: moneyText,
+		});
+	}
+	if (sales.length) {
+		chart($("#sv-sales", el), {
+			x: sales.map(p => p.d),
+			series: [
+				{ type: "bar", values: sales.map(p => p.value), color: "rgba(255,209,0,.55)", name: "Sold for", fmt: moneyText },
+				{ type: "line", values: sales.map(p => p.units), color: "#1eff00", width: 2, dots: true, axis: "right", name: "Items sold", fmt: v => v.toFixed(1) },
+			],
+			yFmt: moneyText, y2Fmt: v => v.toFixed(0),
+		});
+	}
+	if (now.length) list($("#sv-now", el), "sv-now", now, ["item", "aQty", "aEach", "aBuyout", "aBid", "aLeft"], { sort: "aBuyout", resetPage: true });
+	list($("#sv-items", el), "sv-items", items, ["item", "iSeen", "iLast", "iPrice"], { sort: "iSeen", resetPage: true, pageSize: 15 });
+}
+
 
 // ---------------------------------------------------------------------------
 // Deals, disenchant, vendor flips, my auctions

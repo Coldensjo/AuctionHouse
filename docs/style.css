@@ -235,6 +235,9 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .item-head h1 { font-size: 26px; }
 .item-head .sub { color: var(--muted); }
 .item-head .links { margin-left: auto; display: flex; gap: 8px; }
+h1.seller-name { color: var(--gold); }
+a.seller { color: #69ccf0; }
+a.seller:hover { color: var(--white); }
 .item-grid { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 16px; align-items: start; }
 .stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .kv { display: grid; grid-template-columns: 1fr auto; gap: 3px 14px; font-size: 13.5px; }

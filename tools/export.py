@@ -9,13 +9,14 @@ Usage:
 Auctionator keeps one low/high price per item per day for 21 days. The addon adds every scan with its
 time. state/archive/<realm>/daily.json keeps the daily history forever; per-scan detail is kept for
 "scan_history_days" in state/archive/<realm>/scans/<day>.json and folded into the daily history.
+Full scans also carry every auction with its seller: see sales.py for the sellers and estimated sales.
 """
 import argparse, datetime, glob, json, os, shutil, statistics, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-import disenchant, luasv, publish, wowhead
+import disenchant, luasv, publish, sales, wowhead
 
 APP = os.path.join(ROOT, "docs") # the site's own files (html, js, css, fonts, images)
 SITE = publish.SITE # built site, also the gh-pages checkout
@@ -104,7 +105,8 @@ def read_accounts(cfg):
 			print(f"  skipping {path}: {e}", file=sys.stderr)
 
 def read_sync_scans(cfg):
-	"""Yields (realm, time, full, faction, {id: [min, qty, auctions, median]}) for every scan the addon stored."""
+	"""Yields (realm, time, full, faction, {id: [min, qty, auctions, median]}, auctions) for every scan the addon stored.
+	auctions: [[id, count, buyout, seller, timeLeft, bid]] for full scans that carry their auction list, else None."""
 	for path in saved_variables(cfg, "AuctionhouseSync"):
 		try:
 			db = luasv.load(path).get("AuctionhouseSyncDB") or {}
@@ -121,7 +123,8 @@ def read_sync_scans(cfg):
 					items[f[0]] = [int(x) for x in f[1:]]
 			if items:
 				full = bool(s.get("full")) or len(items) >= FULL_SCAN_MIN_ITEMS
-				yield luasv.text(s.get("realm")) or "", int(s["t"]), full, luasv.text(s.get("faction")) or "", items
+				auctions = sales.parse(luasv.text(s.get("auc")), luasv.text(s.get("owners"))) if s.get("auc") else None
+				yield luasv.text(s.get("realm")) or "", int(s["t"]), full, luasv.text(s.get("faction")) or "", items, auctions or None
 
 def read_disenchant_buckets(cfg):
 	"""Learned disenchant results from the DisenchantValue addon, merged over all accounts."""
@@ -154,6 +157,23 @@ class Realm:
 		for path in glob.glob(os.path.join(self.dir, "scans", "*.json")):
 			self.scans[int(os.path.basename(path)[:-5])] = load_json(path, {})
 		self.dirty_days = set()
+		self.store = sales.Store(self.dir, load_json, save_json, scan_day)
+		self._refs = None
+
+	def price_check(self, tcfg):
+		"""ok(itemID, unit price): False for a joke price (above the ceiling or far above the item's usual price)."""
+		def ok(item_id, unit):
+			if self._refs is None:
+				self._refs = {}
+			key = str(item_id)
+			if key not in self._refs:
+				e = self.items.get(key)
+				lows = [v[0] for v in e["d"].values()] if e else []
+				self._refs[key] = statistics.median_low(lows) if lows else None
+			ceiling = (tcfg["item_max_gold"].get(key) or tcfg["max_price_gold"]) * 10000
+			ref = self._refs[key]
+			return unit <= ceiling and not (ref and unit > tcfg["spike_factor"] * ref)
+		return ok
 
 	def merge_auctionator(self, realm_data):
 		"""Merges one Auctionator realm table (daily low/high/quantity). Returns the newest day seen."""
@@ -368,6 +388,13 @@ def blank_stats(entry):
 		"n": None, "med": None, "pts": 0,
 	}
 
+def seller_shard(name):
+	"""Which sel/<n>.json a seller is in (the site computes the same)."""
+	h = 0
+	for ch in name:
+		h = (h * 31 + ord(ch)) % 1000003
+	return h % SHARDS
+
 def build_realm(realm, items, buckets, auctionator_scan, tcfg):
 	"""Writes site/data/<realm>/ and returns the realm summary for realms.json."""
 	arc = realm.items
@@ -402,6 +429,47 @@ def build_realm(realm, items, buckets, auctionator_scan, tcfg):
 	if any(ignored.values()):
 		print(f"  {sum(len(x) for x in ignored.values())} joke prices ignored on {sum(1 for x in ignored.values() if x)} items")
 
+	# Estimated sales (sales.py): per item per day [units, value, auctions bought, auctions gone], and how
+	# much of each day the compared scans covered (per faction; the best covered faction counts).
+	S = realm.store.sales
+	cover = {int(d): max(f.values()) / 86400 for d, f in S["cover"].items() if f}
+	sold = {} # item -> [[day, units, value, auctions, gone]]
+	for d, its in S["days"].items():
+		for item_id, v in its.items():
+			sold.setdefault(item_id, []).append([int(d), *v])
+	def window(rows, n):
+		w = [r for r in rows if r[0] > today - n]
+		return [sum(r[k] for r in w) for k in range(1, 5)]
+	cover30 = sum(c for d, c in cover.items() if d > today - 30)
+	MIN_COVER_DAYS = 0.25 # a few hours of compared scans do not scale to a whole day
+	for item_id, s in stats.items():
+		rows = sorted(sold.get(item_id, []))
+		units7, value7, _, _ = window(rows, 7)
+		units30, value30, bought30, gone30 = window(rows, 30)
+		s.update(
+			sold7=round(units7, 1) if cover else None,
+			sv7=round(value7) if cover else None,
+			spd=round(units30 / cover30, 1) if cover30 >= MIN_COVER_DAYS else None, # estimated sold per day
+			st=round(bought30 / gone30 * 100) if gone30 >= 1 else None, # sell-through: share of gone auctions that were bought
+			sp=round(value30 / units30) if units30 >= 0.5 else None, # average estimated sale price
+		)
+
+	# Current auctions (newest auction list per faction): per item [[seller, count, buyout, timeLeft, bid]]
+	latest_lists = realm.store.latest()
+	ok_price = realm.price_check(tcfg)
+	current, seller_now = {}, {}
+	for t, faction, auctions in latest_lists:
+		for item_id, count, buyout, seller, time_left, bid in auctions:
+			current.setdefault(str(item_id), []).append([seller, count, buyout, time_left, bid])
+			if seller:
+				n = seller_now.setdefault(seller, {"auctions": [], "value": 0, "items": set()})
+				n["auctions"].append([item_id, count, buyout, time_left, bid])
+				n["items"].add(item_id)
+				if ok_price(item_id, (buyout or bid) / max(1, count)):
+					n["value"] += buyout or bid
+	for rows in current.values():
+		rows.sort(key=lambda a: ((a[2] or a[4]) / max(1, a[1])) if (a[2] or a[4]) else float("inf"))
+
 	def price_now(item_id):
 		s = stats.get(str(item_id))
 		return s and s["last"] >= today - 7 and s["cur"] or None
@@ -412,7 +480,8 @@ def build_realm(realm, items, buckets, auctionator_scan, tcfg):
 
 	# Index: one row per item, everything the list views need to filter and sort.
 	cols = ["id", "cur", "curDay", "curT", "a3", "a7", "a14", "a30", "all", "min", "max", "chg", "wk", "vs30", "vol",
-		"av", "avAvg", "n", "med", "pts", "seen", "first", "last", "inScan", "troll", "ign", "de", "deAvg", "deL", "deN"]
+		"av", "avAvg", "n", "med", "pts", "seen", "first", "last", "inScan", "troll", "ign", "de", "deAvg", "deL", "deN",
+		"sold7", "sv7", "spd", "st", "sp"]
 	rows = []
 	for item_id, s in stats.items():
 		meta = items.get(item_id) or {}
@@ -430,8 +499,9 @@ def build_realm(realm, items, buckets, auctionator_scan, tcfg):
 	rows.sort(key=lambda r: r[0])
 	save_json(os.path.join(out, "index.json"), {"cols": cols, "today": today, "rows": rows})
 
-	# History shards: daily history [day, low, high, avail, scanMean, scans], scans [t, min, qty, auctions, median]
-	# and the joke prices that were left out [time or day, price, reason] (newest 50).
+	# History shards: daily history [day, low, high, avail, scanMean, scans], scans [t, min, qty, auctions, median],
+	# the joke prices that were left out [time or day, price, reason] (newest 50), estimated sales per day
+	# [day, units, value, auctions bought, auctions gone] and current auctions [seller, count, buyout, timeLeft, bid].
 	shards = {}
 	for item_id, e in clean.items():
 		days = sorted((int(d), v) for d, v in e["d"].items())
@@ -439,6 +509,8 @@ def build_realm(realm, items, buckets, auctionator_scan, tcfg):
 			"d": [[d, *v] for d, v in days],
 			"s": [list(p) for p in points.get(item_id, [])],
 			"x": sorted(ignored[item_id], key=lambda x: x[0] if x[0] > 1e6 else SCAN_DAY_0 + x[0] * 86400)[-50:],
+			"sl": sorted(sold.get(item_id, [])),
+			"a": current.get(item_id, [])[:100],
 		}
 	for n, shard in shards.items():
 		save_json(os.path.join(out, "h", f"{n}.json"), shard)
@@ -493,16 +565,49 @@ def build_realm(realm, items, buckets, auctionator_scan, tcfg):
 	for d, snap in snap_days.items():
 		save_json(os.path.join(out, "snap", f"d{d}.json"), snap)
 
+	# Estimated sales over time: per day [day, units, value, auctions bought, auctions gone, hours covered]
+	# and per compared scan pair [time, previous time, units, value, auctions bought, auctions gone, new auctions].
+	sales_days = []
+	for d, its in sorted(S["days"].items(), key=lambda x: int(x[0])):
+		tot = [sum(v[k] for v in its.values()) for k in range(4)]
+		sales_days.append([int(d), round(tot[0]), round(tot[1]), round(tot[2]), tot[3], round(cover.get(int(d), 0) * 24, 1)])
+	sales_scans = sorted([p[2], p[1], round(p[3]), p[4], round(p[5]), p[6], p[7]] for p in S["pairs"].values())
 	save_json(os.path.join(out, "market.json"), {
 		"cols": ["day", "items", "listings", "value", "index", "classes"], "days": market_days,
 		"scanCols": ["t", "items", "listings", "auctions", "value", "index"], "scans": market_scans,
+		"sales": sales_days, "salesScans": sales_scans,
 	})
+
+	# Sellers: index rows, and per seller (sharded by name) what they list now, the items they have
+	# listed, auctions and value per scan, and estimated sales per day.
+	seller_rows, seller_shards = [], {}
+	for name in set(realm.store.sellers) | set(seller_now):
+		info = realm.store.sellers.get(name, {"first": 0, "last": 0, "hist": {}, "items": {}})
+		now = seller_now.get(name, {"auctions": [], "value": 0, "items": set()})
+		sd = sorted([int(d), *v] for d, v in S["sellers"].get(name, {}).items())
+		units30, value30, bought30 = [sum(r[k] for r in sd if r[0] > today - 30) for k in (1, 2, 3)]
+		seller_rows.append([name, len(now["auctions"]), now["value"], len(now["items"]), len(info["hist"]),
+			info["first"], info["last"], round(units30), round(value30), round(bought30), len(info["items"])])
+		seller_shards.setdefault(seller_shard(name), {})[name] = {
+			"now": sorted(now["auctions"], key=lambda a: -(a[2] or a[4])),
+			"items": sorted(([int(i), *v] for i, v in info["items"].items()), key=lambda x: (-x[1], -x[2])),
+			"hist": sorted([int(t), *v] for t, v in info["hist"].items()),
+			"sales": sd,
+		}
+	seller_rows.sort(key=lambda r: -r[2])
+	save_json(os.path.join(out, "sellers.json"), {
+		"cols": ["name", "auctions", "value", "items", "scans", "first", "last", "sold30", "soldValue30", "bought30", "itemsEver"],
+		"rows": seller_rows, "lists": sorted([t, f] for t, f, _ in latest_lists),
+	})
+	for n, shard in seller_shards.items():
+		save_json(os.path.join(out, "sel", f"{n}.json"), shard)
 
 	last_scan = max(([full[-1][0]] if full else []) + [auctionator_scan.get(realm.name, 0)]) or int(SCAN_DAY_0 + today * 86400)
 	return {
 		"name": realm.name, "slug": slug(realm.name), "items": len(rows), "today": today,
 		"first": min((s["first"] for s in stats.values()), default=today),
 		"days": len(per_day), "scans": len(full), "lastScan": int(last_scan),
+		"sellers": len(seller_rows), "salesPairs": len(S["pairs"]),
 	}
 
 # ---------------------------------------------------------------------------
@@ -570,18 +675,27 @@ def export(cfg, fetch=True):
 			if item_id != "__dbversion" and isinstance(price, (int, float)):
 				vendor[str(item_id)] = int(price)
 
-	new_scans = 0
-	for raw, t, full, faction, scan_items in read_sync_scans(cfg):
+	new_scans = new_lists = 0
+	tcfg = troll_settings(cfg)
+	for raw, t, full, faction, scan_items, auctions in read_sync_scans(cfg):
 		r = realm(raw)
 		if r and r.merge_scan(t, full, faction, scan_items):
 			new_scans += 1
+		if r and auctions and r.store.add_list(t, faction, auctions, r.price_check(tcfg)):
+			new_lists += 1
 	if new_scans:
 		print(f"  {new_scans} new scans from AuctionhouseSync")
+	if new_lists:
+		print(f"  {new_lists} new auction lists")
 
 	realms = {n: r for n, r in realms.items() if r.items}
+	keep_days = cfg.get("scan_history_days") or 45
 	for r in realms.values():
 		r.fold_scans()
-		r.save(cfg.get("scan_history_days") or 45)
+		r.save(keep_days)
+		r.store.update(r.price_check(tcfg))
+		r.store.prune(keep_days)
+		r.store.save()
 
 	# Item metadata, icons and recipe vendors
 	items = load_json(ITEMS_FILE, {})
