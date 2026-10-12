@@ -163,7 +163,7 @@ function href(view, arg, params) {
 	return `#/${S.realm.slug}/${view}${arg != null ? "/" + encodeURIComponent(arg) : ""}${qs}`;
 }
 
-const VIEWS = { browse, item: itemView, market, sellers, seller: sellerView, deals, disenchant, flips, recipes };
+const VIEWS = { browse, top: topSellers, item: itemView, market, sellers, seller: sellerView, deals, disenchant, flips, recipes };
 let routeToken = 0;
 async function route() {
 	const { realm, view, arg, params } = parseHash();
@@ -395,6 +395,128 @@ async function browse(el, params) {
 }
 
 // ---------------------------------------------------------------------------
+// Top sellers: what sells most, by category
+// ---------------------------------------------------------------------------
+
+// Has an estimated sale in the last 30 days (see sales.py)
+const sellsAny = it => it.sold7 > 0 || it.spd > 0;
+// In the same category as the item: its subclass if it has one, else its class
+const sameCategory = (a, it) => a.c === it.c && (!subName(it) || a.s === it.s);
+
+async function topSellers(el, params) {
+	const D = S.data[S.realm.slug];
+	const st = S.lists.top || (S.lists.top = { sort: "sold7", dir: -1, page: 0 });
+	if (params.get("sort")) { st.sort = params.get("sort"); st.dir = +params.get("dir") || -1; }
+	st.page = +params.get("page") || 0;
+	const f = {
+		q: params.get("q") || "", c: params.get("c") ?? "", s: params.get("s") ?? "",
+		lmin: params.get("lmin") || "", lmax: params.get("lmax") || "", imin: params.get("imin") || "", imax: params.get("imax") || "", qmin: params.get("qmin") || "",
+		all: params.get("all") === "1",
+	};
+	const base = D.list.filter(it => f.all || sellsAny(it));
+
+	// category tree with counts, as on Browse
+	const counts = {};
+	for (const it of base) {
+		counts[it.c] = (counts[it.c] || 0) + 1;
+		counts[`${it.c}:${it.s}`] = (counts[`${it.c}:${it.s}`] || 0) + 1;
+	}
+	let cats = `<a data-c="" class="${f.c === "" ? "on" : ""}">All Items<span class="count">${base.length}</span></a>`;
+	for (const c of CLASS_ORDER) {
+		if (!counts[c]) continue;
+		cats += `<a data-c="${c}" class="${String(c) === f.c && f.s === "" ? "on" : ""}">${esc(S.items.classes[c] || "Unknown")}<span class="count">${counts[c]}</span></a>`;
+		if (String(c) === f.c) {
+			const subs = Object.keys(S.items.subclasses).filter(k => k.startsWith(c + ":") && counts[k])
+				.sort((a, b) => S.items.subclasses[a].localeCompare(S.items.subclasses[b]));
+			for (const k of subs) {
+				const s = k.split(":")[1];
+				cats += `<a class="sub ${f.s === s ? "on" : ""}" data-c="${c}" data-s="${s}">${esc(S.items.subclasses[k])}<span class="count">${counts[k]}</span></a>`;
+			}
+		}
+	}
+
+	el.innerHTML = `
+		<form class="filters" id="filters" autocomplete="off">
+			<div class="f name"><span>Name</span><input name="q" type="search" value="${esc(f.q)}" placeholder="Item name or ID"></div>
+			<div class="f"><span>Level Range</span><div class="range"><input name="lmin" type="number" min="0" max="80" value="${esc(f.lmin)}"> - <input name="lmax" type="number" min="0" max="80" value="${esc(f.lmax)}"></div></div>
+			<div class="f"><span>Item Level</span><div class="range"><input name="imin" type="number" min="0" value="${esc(f.imin)}"> - <input name="imax" type="number" min="0" value="${esc(f.imax)}"></div></div>
+			<div class="f"><span>Rarity</span><select name="qmin"><option value="">All</option>${QUALITY.slice(0, 6).map((n, i) => `<option value="${i}" class="q${i}" ${f.qmin === String(i) ? "selected" : ""}>${n}${i < 5 ? " +" : ""}</option>`).join("")}</select></div>
+			<div class="f"><label class="chk"><input name="all" type="checkbox" ${f.all ? "checked" : ""}> Include items with no sales</label></div>
+			<div class="f"><button type="button" class="btn" id="reset">Reset</button></div>
+		</form>
+		<div class="browse">
+			<div class="cats box" id="cats">${cats}</div>
+			<div>
+				<div class="box" style="margin-bottom:14px"><p class="note" style="margin:0">Estimated sales from comparing full scans (see the item pages). Sold 7d covers the last 7 days, Sold/Day the last 30. Click a column to sort.</p></div>
+				<div id="results"></div>
+			</div>
+		</div>`;
+
+	const form = $("#filters", el);
+	function apply() {
+		const qWords = f.q.toLowerCase().split(/\s+/).filter(Boolean);
+		const qmin = f.qmin === "" ? -1 : +f.qmin;
+		const lmin = f.lmin === "" ? null : +f.lmin, lmax = f.lmax === "" ? null : +f.lmax;
+		const imin = f.imin === "" ? null : +f.imin, imax = f.imax === "" ? null : +f.imax;
+		const res = base.filter(it =>
+			(f.c === "" || String(it.c) === f.c) && (f.s === "" || String(it.s) === f.s) &&
+			(qmin < 0 || it.q >= qmin) &&
+			(lmin == null || it.req >= lmin) && (lmax == null || it.req <= lmax) &&
+			(imin == null || it.ilvl >= imin) && (imax == null || it.ilvl <= imax) &&
+			(!qWords.length || String(it.id) === f.q.trim() || qWords.every(w => it.lname?.includes(w))));
+		list($("#results", el), "top", res, ["item", "req", "ilvl", "sold7", "sv7", "spd", "st", "sp", "cur", "a30"], { onChange: sync, empty: "No items sold in this category yet." });
+	}
+	function sync() {
+		const p = new URLSearchParams();
+		for (const [k, v] of Object.entries(f)) if (v !== "" && v !== false) p.set(k, v === true ? "1" : v);
+		if (st.sort !== "sold7" || st.dir !== -1) { p.set("sort", st.sort); p.set("dir", st.dir); }
+		if (st.page) p.set("page", st.page);
+		history.replaceState(null, "", href("top", null, p));
+	}
+	let timer;
+	form.oninput = e => {
+		if (e.target.name === "all") return;
+		const fd = new FormData(form);
+		for (const k of ["q", "lmin", "lmax", "imin", "imax", "qmin"]) f[k] = fd.get(k) || "";
+		clearTimeout(timer);
+		timer = setTimeout(() => { st.page = 0; sync(); apply(); }, 120);
+	};
+	// the checkbox changes which items count, so the category counts need a re-render
+	form.onchange = e => {
+		if (e.target.name !== "all") return;
+		f.all = e.target.checked;
+		st.page = 0;
+		sync();
+		route();
+	};
+	form.onsubmit = e => e.preventDefault();
+	$("#reset", el).onclick = () => {
+		delete S.lists.top;
+		history.replaceState(null, "", href("top"));
+		route();
+	};
+	$("#cats", el).onclick = e => {
+		const a = e.target.closest("a[data-c]");
+		if (!a) return;
+		f.c = a.dataset.c;
+		f.s = a.dataset.s ?? "";
+		st.page = 0;
+		sync();
+		topSellers(el, new URLSearchParams(location.hash.split("?")[1] || ""));
+	};
+	apply();
+	if (!params.toString()) $("input[name=q]", el).focus();
+}
+
+// The best sellers in the item's category, shown on its item page
+function catTopBox(it) {
+	const label = subName(it) || className(it);
+	const p = subName(it) ? { c: it.c, s: it.s } : { c: it.c };
+	return `<div class="box"><h3>Top Sellers in ${esc(label)}</h3><div id="cat-top"></div>
+		<p class="note" style="margin-top:8px">Estimated sales, see the item pages. <a href="${href("top", null, new URLSearchParams(p))}">All ${esc(label)} sellers</a></p></div>`;
+}
+
+// ---------------------------------------------------------------------------
 // Item page
 // ---------------------------------------------------------------------------
 
@@ -546,6 +668,7 @@ async function itemView(el, params, arg, token) {
 						<span>Sell-through</span><span>${it.st != null ? it.st + "%" : "-"}</span>
 					</div>
 					${sales.some(p => p.units > 0) ? `<div class="chart short" id="sales"></div>` : ""}<p class="note">${SALES_NOTE}</p></div>` : ""}
+				${catTopBox(it)}
 				${auctions.length ? `<div class="box"><h3>Current Auctions <span class="muted" style="font-size:13px">(${auctions.length}${auctions.length >= 100 ? "+" : ""} &middot; ${new Set(auctions.map(a => a[0]).filter(Boolean)).size} sellers)</span></h3>
 					<div class="tbl-wrap" style="max-height:360px;overflow:auto"><table class="list"><thead><tr>${named ? `<th class="nosort">Seller</th>` : ""}<th class="r nosort">Qty</th><th class="r nosort">Each</th><th class="r nosort">Buyout</th><th class="r nosort">Bid</th><th class="nosort">Time Left</th></tr></thead><tbody>
 					${auctions.map(([who, qty, buyout, tl, bid]) => `<tr>${named ? `<td>${sellerLink(who)}</td>` : ""}<td class="r">${qty}</td><td class="r">${buyout ? money(Math.ceil(buyout / qty)) : num(null)}</td><td class="r">${buyout ? money(buyout) : num(null)}</td><td class="r">${bid ? money(bid) : num(null)}</td><td>${timeLeft(tl)}</td></tr>`).join("")}
@@ -573,6 +696,9 @@ async function itemView(el, params, arg, token) {
 				<div class="box"><h3>Daily History</h3><div id="days"></div></div>
 			</div>
 		</div>`;
+
+	list($("#cat-top", el), "cattop", D.list.filter(x => sellsAny(x) && sameCategory(x, it)), ["item", "sold7", "spd", "sp"],
+		{ sort: "sold7", pageSize: 10, noPager: true, empty: "No sales estimated in this category yet." });
 
 	// price chart: per scan, or daily with a range
 	const rangeEl = $("#range", el);

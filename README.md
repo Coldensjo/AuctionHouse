@@ -44,6 +44,9 @@ question on or off.
   items, and items new to or gone from the market.
 - **Sellers**: everyone with auctions, their listed value and estimated sales. A page per seller shows what they
   list now, every item they have listed, their auctions per scan and their estimated sales.
+- **Top Sellers**: estimated sales per item, with the same category tree and filters as Browse (name, level, item level,
+  rarity). Sortable by sold in 7 days, sales value, sold per day, sell-through and average sale price. Every item page
+  also shows the top sellers in its category.
 - **Deals**: items listed below their 30 day average.
 - **Disenchant**: items worth more disenchanted than their buyout, enchanting material prices, and value per item level.
 - **Vendor Flips**: items listed below vendor price, and vendor items listed above vendor price.
