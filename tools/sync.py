@@ -83,14 +83,16 @@ def install_addon(cfg):
 		log.info("installed/updated the AuctionhouseSync addon in WoW (takes effect after /reload or restarting WoW)")
 
 def signature(cfg):
+	"""Sizes and times of WoW's saved data and of the site's own files (docs/), so a change to either is uploaded."""
+	paths = [path for addon in WATCHED for path in export.saved_variables(cfg, addon)]
+	paths += [os.path.join(base, f) for base, _, files in os.walk(export.APP) for f in files]
 	sig = {}
-	for addon in WATCHED:
-		for path in export.saved_variables(cfg, addon):
-			try:
-				st = os.stat(path)
-				sig[path] = (st.st_mtime, st.st_size)
-			except OSError:
-				pass
+	for path in paths:
+		try:
+			st = os.stat(path)
+			sig[path] = (st.st_mtime, st.st_size)
+		except OSError:
+			pass
 	return sig
 
 def sync_once(cfg):
@@ -109,7 +111,7 @@ def main():
 	args = ap.parse_args()
 	setup_logging()
 	if not single_instance():
-		log.info("another sync is already running; exiting")
+		log.info("another sync is already running (it uploads new scans and site changes by itself); exiting")
 		return
 	cfg = export.load_config()
 	install_addon(cfg)
@@ -134,7 +136,7 @@ def main():
 			seen = now
 			pending = True
 			retry_at = 0
-			log.info("new data from WoW")
+			log.info("new data from WoW or changed site files")
 		if pending and time.time() >= retry_at:
 			cfg = export.load_config()
 			if sync_once(cfg):
