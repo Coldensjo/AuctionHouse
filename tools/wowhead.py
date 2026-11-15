@@ -145,25 +145,57 @@ def parse_tooltip_json(text):
 	if not j or not j.get("name"):
 		return None
 	tt = j.get("tooltip") or ""
-	num = lambda pat: int(m.group(1)) if (m := re.search(pat, tt)) else 0
+	# A recipe's tooltip ends with the tooltip of the item it makes (its slot, armor type and class marker).
+	# The item's own part ends with its sell price, so class and slot are read from that part only.
+	sell_end = re.search(r'whtt-sellprice">.*?</div>', tt, re.S)
+	own = tt[:sell_end.end()] if sell_end else tt
+	num = lambda pat: int(m.group(1)) if (m := re.search(pat, own)) else 0
 	sell_html = re.search(r'whtt-sellprice">(.*?)</div>', tt, re.S)
 	sell = 0
 	if sell_html:
 		for unit, mult in (("gold", 10000), ("silver", 100), ("copper", 1)):
 			m = re.search(r'money%s">(\d+)' % unit, sell_html.group(1))
 			sell += int(m.group(1)) * mult if m else 0
-	slot_m = re.search(r'<table width="100%"><tr><td>([^<]+)</td>', tt)
+	slot_m = re.search(r'<table width="100%"><tr><td>([^<]+)</td>', own)
 	slotn = slot_m.group(1).strip() if slot_m else ""
 	meta = {
 		"name": j["name"], "q": int(j.get("quality") or 0), "icon": (j.get("icon") or "inv_misc_questionmark").lower(),
 		"c": -1, "cn": "Unknown", "s": -1, "sn": "Unknown", "slot": SLOT_IDS.get(slotn, 0), "slotn": slotn,
 		"ilvl": num(r"<!--ilvl-->(\d+)"), "req": num(r"<!--rlvl-->(\d+)"), "sell": sell, "buy": 0,
 		"tt": clean_tooltip(tt),
+		"tv": TOOLTIP_PARSE_VERSION,
 	}
-	sc = re.search(r"<!--scstart(\d+):(\d+)-->", tt)
+	sc = re.search(r"<!--scstart(\d+):(\d+)-->", own)
 	if sc:
 		set_class(meta, int(sc.group(1)), int(sc.group(2)))
+	prof = re.search(r'Requires <a href="/forever/skill=\d+/([a-z-]+)', own)
+	if prof and "Teaches you" in own: # a recipe: its profession is the subclass (other skills: Book)
+		set_class(meta, 9, RECIPE_SUBCLASSES.get(prof.group(1), 0))
+		meta["slot"], meta["slotn"] = 0, ""
 	return meta
+
+# Recipe subclass by the profession skill a recipe's tooltip links to.
+RECIPE_SUBCLASSES = {"leatherworking": 1, "tailoring": 2, "engineering": 3, "blacksmithing": 4, "cooking": 5, "alchemy": 6,
+	"first-aid": 7, "enchanting": 8, "fishing": 9, "jewelcrafting": 10}
+# Raise when parse_tooltip_json changes: items parsed by an older version are parsed again from the cached tooltip.
+TOOLTIP_PARSE_VERSION = 2
+
+def reparse_tooltips(items):
+	"""Parses again, from the cached tooltips, items an older parse_tooltip_json read (only those the
+	list pages have not classified). Returns the number updated."""
+	n = 0
+	for i, meta in items.items():
+		if not meta or meta.get("missing") or meta.get("classed") or meta.get("tv", 1) >= TOOLTIP_PARSE_VERSION:
+			continue
+		path = os.path.join(CACHE, "tt", i)
+		if not os.path.exists(path):
+			continue
+		with open(path, encoding="utf-8") as f:
+			new = parse_tooltip_json(f.read())
+		if new:
+			items[i] = new
+			n += 1
+	return n
 
 def _cached(kind, item_id, url):
 	path = os.path.join(CACHE, kind, f"{item_id}")

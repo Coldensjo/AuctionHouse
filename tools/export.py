@@ -11,12 +11,12 @@ time. state/archive/<realm>/daily.json keeps the daily history forever; per-scan
 "scan_history_days" in state/archive/<realm>/scans/<day>.json and folded into the daily history.
 Full scans also carry every auction with its seller: see sales.py for the sellers and estimated sales.
 """
-import argparse, datetime, glob, json, os, shutil, statistics, sys, time
+import argparse, datetime, glob, json, os, re, shutil, statistics, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-import disenchant, luasv, publish, sales, wowhead
+import crafted, disenchant, luasv, publish, sales, wowhead
 
 APP = os.path.join(ROOT, "docs") # the site's own files (html, js, css, fonts, images)
 SITE = publish.SITE # built site, also the gh-pages checkout
@@ -30,6 +30,11 @@ ZONES_FILE = os.path.join(HERE, "zones.json")
 SHARDS = 32 # history and tooltip files are split by itemID % SHARDS so the site loads small pieces
 SNAPSHOT_DAYS = 90 # days that can be compared on the market page (every kept scan can be)
 FULL_SCAN_MIN_ITEMS = 1000 # a stored scan this big is a full scan even when the addon did not flag it (searches cover a few items)
+# A full scan with less than this share of the auctions of the previous full scan (of the same faction, at most
+# PARTIAL_MAX_GAP earlier) was cut short: the client had not loaded the whole list. It is ignored, as its prices
+# are skewed (fewer auctions, so the cheap ones are missed) and the auctions missing from it would count as sold.
+PARTIAL_SHARE = 0.5
+PARTIAL_MAX_GAP = 2 * 86400
 SCAN_DAY_0 = datetime.datetime(2020, 1, 1).timestamp() # Auctionator's day 0 (local midnight)
 
 DEFAULT_CONFIG = {
@@ -126,6 +131,30 @@ def read_sync_scans(cfg):
 				auctions = sales.parse(luasv.text(s.get("auc")), luasv.text(s.get("owners")), luasv.text(s.get("ah"))) if s.get("auc") else None
 				yield luasv.text(s.get("realm")) or "", int(s["t"]), full, luasv.text(s.get("faction")) or "", items, auctions or None
 
+def read_sell_prices(cfg):
+	"""{itemID string: vendor sell price} as the game gives it (the addon reads GetItemInfo for every item Auctionator has)."""
+	out = {}
+	for path in saved_variables(cfg, "AuctionhouseSync"):
+		try:
+			sell = (luasv.load(path).get("AuctionhouseSyncDB") or {}).get("sell") or {}
+		except Exception as e:
+			print(f"  skipping {path}: {e}", file=sys.stderr)
+			continue
+		for item_id, price in (enumerate(sell, 1) if isinstance(sell, list) else sell.items()):
+			if isinstance(price, (int, float)):
+				out[str(item_id)] = int(price)
+	return out
+
+def tooltip_sell(tt, price):
+	"""The tooltip with its sell price line set to `price` (removed when the item cannot be sold)."""
+	line = re.search(r'<div class="whtt-sellprice">.*?</div>', tt, re.S)
+	if not price:
+		return tt[:line.start()] + tt[line.end():] if line else tt
+	g, sv, c = price // 10000, price // 100 % 100, price % 100
+	parts = [f'<span class="money{unit}">{n}</span>' for unit, n in (("gold", g), ("silver", sv), ("copper", c)) if n]
+	new = f'<div class="whtt-sellprice">Sell Price: {" ".join(parts)}</div>'
+	return tt[:line.start()] + new + tt[line.end():] if line else tt
+
 def read_seller_scans(cfg):
 	"""Yields (realm, faction, started, itemID, time, rows) for every item result of the addon's seller scans
 	(the one in progress and the finished ones). rows: [[qty, unit, [sellers], number of sellers]]."""
@@ -193,9 +222,21 @@ class Realm:
 			return unit <= ceiling and not (ref and unit > tcfg["spike_factor"] * ref)
 		return ok
 
+	def scanned(self):
+		"""{day: set of itemIDs} the kept scans of each day cover."""
+		out = {}
+		for day, store in self.scans.items():
+			ids = out.setdefault(day, set())
+			for s in store.values():
+				ids.update(s["items"])
+		return out
+
 	def merge_auctionator(self, realm_data):
-		"""Merges one Auctionator realm table (daily low/high/quantity). Returns the newest day seen."""
+		"""Merges one Auctionator realm table (daily low/high/quantity). Returns the newest day seen.
+		An item's day that the kept scans cover is left to them: Auctionator saw the same scans, and it
+		also took in partial ones that are ignored here."""
 		newest = 0
+		scanned = self.scanned()
 		for key, rec in realm_data.items():
 			if not isinstance(rec, dict) or "h" not in rec:
 				continue
@@ -204,6 +245,8 @@ class Realm:
 				continue
 			entry = self.items.setdefault(str(key), {"m": 0, "md": 0, "d": {}})
 			for day, high in h.items():
+				if str(key) in scanned.get(int(day), ()):
+					continue
 				self.observe(entry, str(day), l.get(day, high), high, a.get(day))
 			last = max(int(d) for d in h)
 			newest = max(newest, last)
@@ -241,6 +284,17 @@ class Realm:
 			if day > entry["md"] or (day == entry["md"] and t >= entry.get("mt", 0)):
 				entry["m"], entry["md"], entry["mt"] = low, day, t
 		return True
+
+	def partial(self, t, faction, items):
+		"""The previous full scan (time, auctions) when this full scan has far fewer auctions than it, else None."""
+		prev = None
+		for store in self.scans.values():
+			for key, s in store.items():
+				t0 = int(key)
+				if s["full"] and s["faction"] == faction and t - PARTIAL_MAX_GAP <= t0 < t and (not prev or t0 > prev[0]):
+					prev = (t0, sum(v[2] for v in s["items"].values()))
+		n = sum(v[2] for v in items.values())
+		return prev if prev and n < prev[1] * PARTIAL_SHARE else None
 
 	def scan_list(self):
 		"""All kept scans, oldest first: (t, full, items)."""
@@ -709,8 +763,13 @@ def export(cfg, fetch=True):
 
 	new_scans = new_lists = 0
 	tcfg = troll_settings(cfg)
-	for raw, t, full, faction, scan_items, auctions in read_sync_scans(cfg):
+	for raw, t, full, faction, scan_items, auctions in sorted(read_sync_scans(cfg), key=lambda s: s[1]):
 		r = realm(raw)
+		prev = r and full and str(t) not in r.scans.get(scan_day(t), {}) and r.partial(t, faction, scan_items)
+		if prev:
+			print(f"  ignored the partial full scan of {datetime.datetime.fromtimestamp(t):%Y-%m-%d %H:%M}: "
+				f"{sum(v[2] for v in scan_items.values())} auctions, against {prev[1]} in the one before")
+			continue
 		if r and r.merge_scan(t, full, faction, scan_items):
 			new_scans += 1
 		if r and auctions and r.store.add_list(t, faction, auctions, r.price_check(tcfg)):
@@ -736,12 +795,22 @@ def export(cfg, fetch=True):
 		r.store.prune(keep_days)
 		r.store.save()
 
+	# Market data for the GoldScout addon, read in the game on /reload
+	try:
+		import goldscout
+		if goldscout.write(cfg, STATE, SCAN_DAY_0):
+			print("  GoldScout market data written")
+	except Exception as e:
+		print(f"  GoldScout market data not written: {e}")
+
 	# Item metadata, icons and recipe vendors
 	items = load_json(ITEMS_FILE, {})
 	vendors = load_json(VENDORS_FILE, {})
 	ids = set(disenchant.MATERIALS)
 	for r in realms.values():
 		ids |= {int(i) for i in r.items}
+	if wowhead.reparse_tooltips(items):
+		save_json(ITEMS_FILE, items)
 	if fetch:
 		changed = wowhead.update_items(items, sorted(ids))
 		save_json(ITEMS_FILE, items) # before classifying, so a failure there keeps the fetched tooltips
@@ -751,6 +820,17 @@ def export(cfg, fetch=True):
 		mine = {str(i): items.get(str(i)) for i in ids}
 		if wowhead.update_vendors(mine, vendors, load_json(ZONES_FILE, {})):
 			save_json(VENDORS_FILE, vendors)
+
+	# The game's own sell prices over Wowhead's (in memory only: state/items.json keeps what Wowhead says)
+	game_sell = read_sell_prices(cfg)
+	items = {i: dict(m) if m else m for i, m in items.items()}
+	for i, price in game_sell.items():
+		m = items.get(i)
+		if m and not m.get("missing") and m.get("sell") != price:
+			m["sell"] = price
+			if m.get("tt"):
+				m["tt"] = tooltip_sell(m["tt"], price)
+	print(f"  vendor sell prices from the game: {len(game_sell)} items")
 
 	# Build the site: app files, icons, data, and a backup of state/
 	os.makedirs(SITE, exist_ok=True)
@@ -783,17 +863,31 @@ def export(cfg, fetch=True):
 	for i in sorted(ids):
 		m = items.get(str(i))
 		if not m or m.get("missing"):
-			rows[i] = [f"Item #{i}", 1, "inv_misc_questionmark", -1, -1, 0, 0, 0, 0, vendor.get(str(i), 0)]
+			rows[i] = [f"Item #{i}", 1, "inv_misc_questionmark", -1, -1, 0, 0, 0, game_sell.get(str(i), 0), vendor.get(str(i), 0)]
 			continue
 		# names from the current tables, so fixes there apply without fetching items again
 		classes[m["c"]] = wowhead.CLASSES.get(m["c"]) or m["cn"]
 		subclasses[f"{m['c']}:{m['s']}"] = wowhead.SUBCLASSES.get(m["c"], {}).get(m["s"]) or m["sn"]
 		if m["slot"]:
 			slots[m["slot"]] = m["slotn"]
-		rows[i] = [m["name"], m["q"], m["icon"], m["c"], m["s"], m["slot"], m["ilvl"], m["req"], m["sell"], m["buy"] or vendor.get(str(i), 0)]
+		rows[i] = [m["name"], m["q"], m["icon"], m["c"], m["s"], m["slot"], m["ilvl"], m["req"], m["sell"], vendor.get(str(i)) or m["buy"]] # what merchants charged in game first
+	# Profession that crafts each item: the 1.12 crafting spells plus what this server's recipes teach
+	made_by = {}
+	known = crafted.load()
+	for i, profs in known.items():
+		for p in profs:
+			made_by.setdefault(i, set()).add(p)
+	for i, p in crafted.from_recipes(items, os.path.join(wowhead.CACHE, "tt"), known).items():
+		made_by.setdefault(i, set()).add(p)
+	by_prof = {}
+	for i, profs in made_by.items():
+		if int(i) in rows:
+			for p in profs:
+				by_prof.setdefault(p, []).append(int(i))
 	save_json(os.path.join(DATA, "items.json"), {
 		"cols": ["name", "q", "icon", "c", "s", "slot", "ilvl", "req", "sell", "buy"],
 		"items": rows, "classes": classes, "subclasses": subclasses, "slots": slots,
+		"crafted": {p: sorted(v) for p, v in sorted(by_prof.items())},
 	})
 
 	tooltips = {}

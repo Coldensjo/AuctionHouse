@@ -33,7 +33,9 @@ question on or off.
 
 ## What the site shows
 
-- **Browse**: the Classic auction house browser. Category tree, name, level, rarity and price filters, sortable columns.
+- **Browse**: the Classic auction house browser. Category tree, name, level, rarity, price and crafting-profession
+  filters, sortable columns. Which profession makes an item comes from `tools/crafted.json` (the 1.12 crafting spells,
+  rebuilt with `python tools/crafted.py <mangos.sql>` from a VMaNGOS dump) plus what this server's recipe tooltips teach.
 - **Item pages**: current price, auctions and median in the latest scan, every current auction with its seller,
   estimated sales (sold per day, sell-through, sale price), 3/7/14/30 day and all-time averages,
   lowest and highest ever, volatility, price history per scan and per day, best time of day and best weekday
@@ -50,6 +52,9 @@ question on or off.
 - **Deals**: items listed below their 30 day average.
 - **Disenchant**: items worth more disenchanted than their buyout, enchanting material prices, and value per item level.
 - **Vendor Flips**: items listed below vendor price, and vendor items listed above vendor price.
+- **Crates**: what it costs to fill each Waylaid Crate for Merchant's Favor (the crate plus its cheapest bundle, minus the
+  silver paid at turn-in), ranked by net cost per Favor, with every bundle each crate accepts. Uses the 7 day average or the latest scan, filters by level and
+  crate quality, and can leave the crate's price out for crates you already have.
 - **Vendor Recipes**: recipes a vendor sells that are also on the auction house, vendor price vs auction price,
   with the vendors' names, zones, faction and limited stock. Filter by faction and profession.
 

@@ -47,13 +47,25 @@ async function loadRealm(slug) {
 			cols.forEach((c, i) => (it[c] = row[i]));
 			Object.assign(it, itemMeta(it.id));
 			it.inScan = it.inScan == null ? it.last === idx.today : !!it.inScan; // in the latest full scan
-			it.deProfit = it.de && it.inScan ? it.de - it.cur : null;
-			it.flip = it.sell && it.inScan ? it.sell - it.cur : null;
+			// A joke listing has no real price (cur is empty), so it can't be a flip or a disenchant buy.
+			const buyable = it.inScan && it.cur > 0 && !it.troll;
+			it.deProfit = it.de && buyable ? it.de - it.cur : null;
+			it.flip = it.sell && buyable ? it.sell - it.cur : null;
 			list.push(it);
 			byId.set(it.id, it);
 		}
 		return (S.data[slug] = { list, byId, today: idx.today });
 	});
+}
+
+// Professions that craft an item (items.json "crafted": {profession: [itemID, ...]})
+function craftedBy(id) {
+	if (!S.craftedBy) {
+		S.craftedBy = new Map();
+		for (const [p, ids] of Object.entries(S.items.crafted || {}))
+			for (const i of ids) S.craftedBy.set(i, [...(S.craftedBy.get(i) || []), p]);
+	}
+	return S.craftedBy.get(id) || [];
 }
 
 function itemMeta(id) {
@@ -163,7 +175,7 @@ function href(view, arg, params) {
 	return `#/${S.realm.slug}/${view}${arg != null ? "/" + encodeURIComponent(arg) : ""}${qs}`;
 }
 
-const VIEWS = { browse, top: topSellers, item: itemView, market, sellers, seller: sellerView, deals, disenchant, flips, recipes };
+const VIEWS = { browse, top: topSellers, item: itemView, market, sellers, seller: sellerView, deals, disenchant, flips, recipes, crates };
 let routeToken = 0;
 async function route() {
 	const { realm, view, arg, params } = parseHash();
@@ -307,16 +319,19 @@ async function browse(el, params) {
 	const f = {
 		q: params.get("q") || "", c: params.get("c") ?? "", s: params.get("s") ?? "",
 		lmin: params.get("lmin") || "", lmax: params.get("lmax") || "", imin: params.get("imin") || "", imax: params.get("imax") || "", qmin: params.get("qmin") || "",
-		pmin: params.get("pmin") || "", pmax: params.get("pmax") || "", now: params.get("now") === "1",
+		pmin: params.get("pmin") || "", pmax: params.get("pmax") || "", now: params.get("now") === "1", prof: params.get("prof") || "",
 	};
+	const profs = Object.keys(S.items.crafted || {});
+	// the profession filter narrows the category tree too, so its counts match
+	const pool = f.prof ? D.list.filter(it => craftedBy(it.id).includes(f.prof)) : D.list;
 
 	// category tree with counts
 	const counts = {};
-	for (const it of D.list) {
+	for (const it of pool) {
 		counts[it.c] = (counts[it.c] || 0) + 1;
 		counts[`${it.c}:${it.s}`] = (counts[`${it.c}:${it.s}`] || 0) + 1;
 	}
-	let cats = `<a data-c="" class="${f.c === "" ? "on" : ""}">All Items<span class="count">${D.list.length}</span></a>`;
+	let cats = `<a data-c="" class="${f.c === "" ? "on" : ""}">All Items<span class="count">${pool.length}</span></a>`;
 	for (const c of CLASS_ORDER) {
 		if (!counts[c]) continue;
 		cats += `<a data-c="${c}" class="${String(c) === f.c && f.s === "" ? "on" : ""}">${esc(S.items.classes[c] || "Unknown")}<span class="count">${counts[c]}</span></a>`;
@@ -336,6 +351,7 @@ async function browse(el, params) {
 			<div class="f"><span>Level Range</span><div class="range"><input name="lmin" type="number" min="0" max="80" value="${esc(f.lmin)}"> - <input name="lmax" type="number" min="0" max="80" value="${esc(f.lmax)}"></div></div>
 			<div class="f"><span>Item Level</span><div class="range"><input name="imin" type="number" min="0" value="${esc(f.imin)}"> - <input name="imax" type="number" min="0" value="${esc(f.imax)}"></div></div>
 			<div class="f"><span>Rarity</span><select name="qmin"><option value="">All</option>${QUALITY.slice(0, 6).map((n, i) => `<option value="${i}" class="q${i}" ${f.qmin === String(i) ? "selected" : ""}>${n}${i < 5 ? " +" : ""}</option>`).join("")}</select></div>
+			<div class="f"><span>Crafted By</span><select name="prof"><option value="">Any</option>${profs.map(p => `<option ${f.prof === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></div>
 			<div class="f"><span>Price (gold)</span><div class="range"><input name="pmin" type="number" min="0" step="any" value="${esc(f.pmin)}"> - <input name="pmax" type="number" min="0" step="any" value="${esc(f.pmax)}"></div></div>
 			<div class="f"><label class="chk"><input name="now" type="checkbox" ${f.now ? "checked" : ""}> On the AH now</label></div>
 			<div class="f"><button type="button" class="btn" id="reset">Reset</button></div>
@@ -351,14 +367,14 @@ async function browse(el, params) {
 		const qmin = f.qmin === "" ? -1 : +f.qmin, pmin = f.pmin === "" ? null : f.pmin * 10000, pmax = f.pmax === "" ? null : f.pmax * 10000;
 		const lmin = f.lmin === "" ? null : +f.lmin, lmax = f.lmax === "" ? null : +f.lmax;
 		const imin = f.imin === "" ? null : +f.imin, imax = f.imax === "" ? null : +f.imax;
-		const res = D.list.filter(it =>
+		const res = pool.filter(it =>
 			(f.c === "" || String(it.c) === f.c) && (f.s === "" || String(it.s) === f.s) &&
 			(qmin < 0 || it.q >= qmin) && (!f.now || it.inScan) &&
 			(lmin == null || it.req >= lmin) && (lmax == null || it.req <= lmax) &&
 			(imin == null || it.ilvl >= imin) && (imax == null || it.ilvl <= imax) &&
 			(pmin == null || it.cur >= pmin) && (pmax == null || it.cur <= pmax) &&
 			(!qWords.length || String(it.id) === f.q.trim() || qWords.every(w => it.lname?.includes(w))));
-		list($("#results", el), "browse", res, ["item", "req", "ilvl", "av", "cur", "a7", "a30", "vs30", "wk", "de", "last"], { onChange: sync });
+		list($("#results", el), "browse", res, ["item", "req", "ilvl", "av", "cur", "a7", "a30", "vs30", "wk", "de"], { onChange: sync });
 	}
 	function sync() {
 		const p = new URLSearchParams();
@@ -372,6 +388,13 @@ async function browse(el, params) {
 		const fd = new FormData(form);
 		for (const k of ["q", "lmin", "lmax", "imin", "imax", "qmin", "pmin", "pmax"]) f[k] = fd.get(k) || "";
 		f.now = fd.get("now") === "on";
+		if ((fd.get("prof") || "") !== f.prof) { // rebuild the category tree for the new profession
+			f.prof = fd.get("prof") || "";
+			clearTimeout(timer);
+			st.page = 0;
+			sync();
+			return browse(el, new URLSearchParams(location.hash.split("?")[1] || ""));
+		}
 		clearTimeout(timer);
 		timer = setTimeout(() => { st.page = 0; sync(); apply(); }, 120);
 	};
@@ -643,8 +666,8 @@ async function itemView(el, params, arg, token) {
 					${it.pts ? `<span>Scans seen in</span><span>${it.pts}</span>` : ""}
 					${it.n != null ? `<span>Auctions (latest scan)</span><span>${num(it.n)}</span>` : ""}
 					<div class="sep"></div>
-					<span>Vendor sells for</span><span>${it.sell ? money(it.sell) : "-"}</span>
-					<span>Vendor buy price</span><span>${it.buy ? money(it.buy) : "-"}</span>
+					<span title="What a vendor pays you for one">Vendor pays</span><span>${it.sell ? money(it.sell) : "-"}</span>
+					<span title="What a vendor charges for one">Vendor charges</span><span>${it.buy ? money(it.buy) : "-"}</span>
 					${it.sell && fromAH != null ? `<span>Vendor flip</span><span>${money(it.sell - fromAH)}</span>` : ""}
 				</div></div>
 				${soldBy.length ? `<div class="box"><h3>Sold by Vendors</h3>${vendorList(soldBy)}
@@ -1294,6 +1317,139 @@ async function recipes(el, params, arg, token) {
 			rows.push({ ...it, npcs, vprice: npcs[0].cost });
 		}
 		list($("#res", el), "recipes", rows, ["item", "prof", "vprice", "cur", "vdiff", "vmargin", "a30", "av", "npcs"], { sort: "vdiff", resetPage: reset, empty: "No vendor recipes match." });
+	};
+	bar.oninput = e => {
+		const k = e.target.dataset.k;
+		if (!k) return;
+		f[k] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+		render(true);
+	};
+	render();
+}
+
+// ---------------------------------------------------------------------------
+// Waylaid Crates: the cheapest way to fill each crate for Merchant's Favor
+// ---------------------------------------------------------------------------
+
+// [crate itemID, [[material itemID, quantity], ...]]. A crate takes any one of its bundles (from the crates' Wowhead tooltips).
+const CRATES = [
+	[248682, [[2447, 20], [765, 20], [2449, 10], [785, 10], [2450, 10]]], // Apprentice Herbs
+	[248683, [[2770, 20], [2771, 20]]], // Apprentice Ore
+	[248684, [[2589, 40], [2318, 20]]], // Apprentice Textiles
+	[248685, [[10940, 20], [10939, 4], [10978, 6], [11084, 2]]], // Apprentice Curiosities
+	[248686, [[3820, 10], [2453, 10], [3355, 10], [3369, 10], [3356, 10]]], // Journeyman Herbs
+	[248687, [[2775, 10], [2772, 20]]], // Journeyman Ore
+	[248688, [[2592, 20], [4306, 40], [2319, 20]]], // Journeyman Textiles
+	[248689, [[11083, 20], [11082, 4], [11138, 6], [11139, 2]]], // Journeyman Curiosities
+	[248690, [[3357, 20], [3818, 10], [3821, 10], [3358, 10]]], // Earthly Expert Herbs
+	[248691, [[3819, 10], [4625, 10], [8831, 20], [8836, 10]]], // Flowering Expert Herbs
+	[248692, [[2776, 10], [3858, 20]]], // Expert Ore
+	[248693, [[4338, 40], [4234, 20]]], // Expert Textiles
+	[248694, [[11137, 20], [11135, 4], [11177, 6], [11178, 2]]], // Expert Curiosities
+	[248695, [[13464, 10], [8838, 20], [8839, 10], [8845, 10], [8846, 10]]], // Earthly Artisan Herbs
+	[248696, [[13463, 20], [13465, 20], [13466, 20], [13467, 20]]], // Flowering Artisan Herbs
+	[248697, [[7911, 10], [10620, 20], [11370, 20]]], // Artisan Ore
+	[248698, [[14047, 40], [4304, 20], [8170, 20]]], // Artisan Textiles
+	[248699, [[11176, 20], [11175, 4], [14343, 6], [14344, 2]]], // Artisan Curiosities
+	[248702, [[4231, 2], [2996, 20]]], // Apprentice Fabrics
+	[248703, [[2840, 20], [3576, 20], [2841, 10]]], // Apprentice Ingots
+	[248704, [[4359, 16], [4361, 16], [4363, 4]]], // Apprentice Parts
+	[248705, [[2997, 6], [4305, 10], [4233, 2]]], // Journeyman Fabrics
+	[248706, [[2842, 10], [3575, 20]]], // Journeyman Ingots
+	[248707, [[4371, 8], [4375, 7], [4382, 4], [10558, 45]]], // Journeyman Parts
+	[248708, [[4339, 8], [4236, 2]]], // Expert Fabrics
+	[248709, [[3860, 20], [3859, 15], [3577, 10]]], // Expert Ingots
+	[248710, [[4387, 8], [10559, 5], [10560, 12], [10561, 5]]], // Expert Parts
+	[248711, [[14048, 8], [8172, 2]]], // Artisan Fabrics
+	[248712, [[11371, 2], [6037, 10], [12359, 20]]], // Artisan Ingots
+	[248713, [[15994, 5], [18631, 5], [16000, 2]]], // Artisan Parts
+];
+// Turn-in reward of a filled crate by rank: Merchant's Favor for a white crate (raw materials) and a green one (crafted
+// goods). Each also pays 50 copper per Favor (2s 50c for a white Apprentice crate). Artisan rewards are not known yet.
+const CRATE_FAVOR = { Apprentice: [5, 10], Journeyman: [10, 20], Expert: [15, 30] };
+function crateReward(it) {
+	const rank = (it.name.match(/Apprentice|Journeyman|Expert|Artisan/) || [])[0];
+	const favor = CRATE_FAVOR[rank]?.[it.q >= 2 ? 1 : 0];
+	return favor ? { favor, back: favor * 50 } : { favor: null, back: null };
+}
+
+async function crates(el) {
+	const D = S.data[S.realm.slug];
+	const f = S.lists["crates:f"] || (S.lists["crates:f"] = { basis: "a7", lvl: "", q: "", own: false, buyable: true });
+	const get = id => D.byId.get(id) || { id, ...itemMeta(id), cur: null, a7: null, av: 0, inScan: false };
+	const price = it => (f.basis === "cur" ? it.cur : it.a7 ?? it.cur);
+	el.innerHTML = `<h2>Waylaid Crates</h2>
+		<p class="note" style="margin-bottom:12px">What it costs to fill each Waylaid Crate for Merchant's Favor: the crate's own price plus its cheapest bundle.
+			A crate takes any <b>one</b> of its bundles. Turning it in gives Merchant's Favor and some silver: green crates (crafted goods) give twice
+			what white ones (raw materials) do, and each rank gives more. The silver is taken off the cost, and the list is ranked by what is left per Favor.</p>
+		<div class="cards crate-cards" id="crate-cards" style="margin-bottom:14px"></div>
+		<div class="toolbar">
+			<label>Prices <select data-k="basis"><option value="a7">7 day average</option><option value="cur">Latest scan</option></select></label>
+			<label>Level <select data-k="lvl"><option value="">All</option><option value="10">10 (Apprentice, Journeyman)</option><option value="20">20 (Expert)</option><option value="35">35 (Artisan)</option></select></label>
+			<label>Crate <select data-k="q"><option value="">All</option><option value="1">White (raw materials)</option><option value="2">Green (crafted goods)</option></select></label>
+			<label class="chk" title="Leave the crate's own price out, for crates you already have"><input type="checkbox" data-k="own"> I have the crates</label>
+			<label class="chk" title="Skip bundles with fewer items listed in the latest scan than the bundle needs"><input type="checkbox" data-k="buyable"> Only bundles listed now</label>
+		</div>
+		<div id="res"></div>
+		<h2 style="margin-top:24px">Every Bundle</h2>
+		<p class="note" style="margin-bottom:12px">All the bundles each crate accepts, cheapest first. The highlighted one is used above. Faded bundles have fewer items listed in the latest scan than they need.</p>
+		<div class="crate-grid" id="crate-all"></div>
+		<p class="note" style="margin-top:14px">Crate contents come from the crates' Wowhead tooltips. Turn-in rewards come from the wow-professions.com guide:
+			Apprentice 5 Favor and 2s 50c (white) or 10 Favor and 5s (green), Journeyman 10 and 5s or 20 and 10s, Expert 15 and 7s 50c or 30 and 15s.
+			Artisan rewards are not known yet, so those crates are listed without a cost per Favor. A negative net cost means the silver back is more than you spend.
+			The 7 day average leaves joke listings out, like every price on this site.</p>`;
+	const bar = $(".toolbar", el);
+	for (const input of $$("[data-k]", bar)) {
+		if (input.type === "checkbox") input.checked = f[input.dataset.k];
+		else input.value = f[input.dataset.k];
+	}
+	const bundleLink = (o, size = "") => `<span class="bundle"><span class="muted">${o.qty}&times;</span>${itemLink(o.m, size)}</span>`;
+	const unknown = `<span class="muted" title="Artisan rewards are not known yet">?</span>`;
+	COLS.fav = { label: "Favor", title: "Merchant's Favor for turning in the filled crate", sort: r => r.favor, cls: "r", fmt: r => (r.favor ? `<span class="q${r.q}">${r.favor}</span>` : unknown) };
+	COLS.back = { label: "Silver Back", title: "Money paid when you turn in the filled crate", sort: r => r.back, cls: "r", fmt: r => (r.back ? money(r.back) : unknown) };
+	COLS.net = { label: "Net Cost", title: "Total minus the money paid at turn-in", sort: r => r.net, cls: "r", fmt: r => money(r.net) };
+	COLS.crateP = { label: "Crate Price", title: "Price of the crate itself", sort: r => r.crateP, cls: "r", fmt: r => (f.own ? `<span class="muted">Owned</span>` : money(r.crateP)) };
+	COLS.bundle = { label: "Cheapest Bundle", sort: r => r.best?.m.name || "", fmt: r => (r.best ? bundleLink(r.best) : `<span class="muted">None listed</span>`) };
+	COLS.bcost = { label: "Bundle Cost", sort: r => r.best?.cost, cls: "r", fmt: r => money(r.best?.cost) };
+	COLS.ctotal = { label: "Total", title: "Crate plus cheapest bundle", sort: r => r.total, cls: "r", fmt: r => money(r.total) };
+	COLS.perFav = { label: "Per Favor", title: "Net cost divided by the Merchant's Favor the crate gives", sort: r => r.perFav, cls: "r", fmt: r => (r.favor ? money(r.perFav, "gold") : unknown) };
+	COL_WIDTHS.fav = 64;
+	COL_WIDTHS.bundle = 230;
+	for (const c of ["crateP", "bcost", "ctotal", "back", "net", "perFav"]) COL_WIDTHS[c] = 108;
+	for (const c of ["crateP", "bcost", "ctotal", "back", "net", "perFav"]) MONEY_COLS.add(c);
+	const render = reset => {
+		const rows = [];
+		for (const [id, mats] of CRATES) {
+			const c = get(id);
+			if ((f.lvl && c.req !== +f.lvl) || (f.q && String(Math.min(c.q, 2)) !== f.q)) continue;
+			const opts = mats.map(([mid, qty]) => {
+				const m = get(mid), unit = price(m);
+				return { m, qty, unit, cost: unit == null ? null : unit * qty, short: !m.inScan || (m.av || 0) < qty };
+			}).sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity));
+			const best = opts.find(o => o.cost != null && !(f.buyable && o.short));
+			const crateP = f.own ? 0 : price(c);
+			const { favor, back } = crateReward(c);
+			const total = best && crateP != null ? crateP + best.cost : null;
+			const net = total == null || back == null ? null : total - back;
+			rows.push({ ...c, name: c.name.replace(/^Waylaid Crate: /, ""), favor, back, crateP, best, opts, total, net, perFav: net == null ? null : net / favor });
+		}
+		list($("#res", el), "crates", rows, ["item", "req", "fav", "crateP", "bundle", "bcost", "ctotal", "back", "net", "perFav"], { sort: "perFav", dir: 1, resetPage: reset, pageSize: CRATES.length, noPager: true, empty: "No crates match." });
+
+		const ranked = rows.filter(r => r.perFav != null).sort((a, b) => a.perFav - b.perFav);
+		const card = (lbl, r, val) => `<div class="card box"><div class="lbl">${lbl}</div><div class="val">${r ? val(r) : `<span class="muted">-</span>`}</div><div class="delta">${r ? itemLink(r, "sm") : ""}</div></div>`;
+		const perFav = r => `${money(r.perFav)} <span class="muted" style="font-size:13px">/ Favor</span>`;
+		$("#crate-cards", el).innerHTML = card("Cheapest Favor", ranked[0], perFav)
+			+ card("Best green crate", ranked.find(r => r.q >= 2), perFav)
+			+ card("Lowest net cost", ranked.slice().sort((a, b) => a.net - b.net)[0], r => money(r.net))
+			+ card("Worst value", ranked[ranked.length - 1], perFav);
+
+		const order = ranked.concat(rows.filter(r => r.perFav == null));
+		$("#crate-all", el).innerHTML = order.map(r => `<div class="box">
+			<h3>${itemLink(r)} <span class="pill q${r.q}">${r.favor ? `${r.favor} Favor + ${moneyText(r.back)}` : "Reward not known yet"}</span></h3>
+			<div class="muted" style="font-size:12.5px;margin:4px 0 6px">Level ${r.req} &middot; Crate ${f.own ? "owned" : money(r.crateP)} &middot; Total ${money(r.total)}${r.net != null ? ` &middot; Net ${money(r.net)}` : ""}</div>
+			<table class="list fixed crate-opts"><colgroup><col><col style="width:86px"><col style="width:118px"><col style="width:70px"></colgroup><thead><tr><th class="nosort">Bundle</th><th class="r nosort">Each</th><th class="r nosort">Cost</th><th class="r nosort" title="Quantity listed in the latest scan">Listed</th></tr></thead>
+			<tbody>${r.opts.map(o => `<tr class="${o === r.best ? "best" : ""} ${o.short ? "short" : ""}"><td>${bundleLink(o, "sm")}</td><td class="r">${money(o.unit)}</td><td class="r">${money(o.cost)}</td><td class="r">${num(o.m.inScan ? o.m.av : 0)}</td></tr>`).join("")}</tbody></table>
+		</div>`).join("");
 	};
 	bar.oninput = e => {
 		const k = e.target.dataset.k;

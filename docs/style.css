@@ -274,6 +274,20 @@ a.seller:hover { color: var(--white); }
 .toolbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 12px; }
 .toolbar .grow { flex: 1; }
 
+/* ---- waylaid crates ---- */
+.crate-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); gap: 14px; }
+.crate-grid h3 { font-size: 15px; }
+.crate-opts { width: 100%; }
+.crate-opts td { white-space: nowrap; }
+.crate-cards { grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)); }
+.crate-cards .val { white-space: nowrap; }
+.bundle { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; white-space: nowrap; }
+.bundle .iname { min-width: 0; }
+.crate-opts tbody tr { cursor: default; }
+.crate-opts tr.best td { background: rgba(30, 255, 0, .08); }
+.crate-opts tr.best td:first-child { box-shadow: inset 3px 0 0 var(--up); }
+.crate-opts tr.short { opacity: .45; }
+
 /* ---- footer ---- */
 .foot { text-align: center; color: #6b6352; font-size: 12px; padding: 10px 20px 30px; }
 .foot a { color: #8c7a4d; }
