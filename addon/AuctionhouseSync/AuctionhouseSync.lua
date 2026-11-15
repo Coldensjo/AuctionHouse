@@ -6,14 +6,19 @@ Records full auction house scans for the auction house website.
 	* A Scan button on the auction house window (or /ahsync scan) runs a full scan: one "replicate"
 	  request on the modern auction house, "get all" on the classic one (allowed every 15 minutes),
 	  then every auction is read: item, stack size, buyout,
-	  current bid, time left and seller. Seller names the client has not loaded yet are read again
-	  a few seconds later.
+	  current bid, time left and seller. The client fills the list in over several seconds, so
+	  auctions not loaded yet are read again until (nearly) all are in; seller names likewise.
+	* A scan is not saved when too few of its auctions could be read, or when it is far smaller
+	  than the previous full scan: a partial scan would skew every price (fewer auctions, so the
+	  cheap ones are missed).
 	* Per item the scan keeps the lowest unit price, quantity listed, number of auctions and median
 	  unit price. The auction list itself lets the website show who sells what and estimate what
 	  sold between two scans.
 	* The modern auction house leaves other players' names out of the full scan, but item searches
 	  have them: Scan Sellers searches every item one by one in the background (slow, throttled).
 	* The prices are also handed to Auctionator, so its tooltips stay current.
+	* The vendor sell price of every item Auctionator has prices for is read from the game
+	  (GetItemInfo) on each login and after each scan, so the website shows the game's own prices.
 	* Auctionator's own searches are recorded too (hooked on its price database). When its Full Scan
 	  button is used instead of ours, the result is read the same way.
 	* WoW only writes saved variables on /reload, logout or exit. After a full scan the addon
@@ -35,6 +40,11 @@ local MAX_AUCTION_SCANS = 6 -- scans that keep their auction list (big; the sync
 local READ_STEP = 1000 -- auctions read per frame
 local NAME_RETRIES = 3 -- times auctions without a seller name are read again
 local NAME_RETRY_DELAY = 3 -- seconds between those reads
+local ITEM_RETRIES = 20 -- times auctions the client has not loaded yet are read again...
+local ITEM_RETRY_DELAY = 2 -- ...this many seconds apart (up to 40 seconds of waiting)
+local MIN_READ_SHARE = 0.9 -- a scan is saved only when this share of the auctions the server listed was read
+local MIN_SIZE_SHARE = 0.5 -- ...and it has at least this share of the auctions of the previous full scan
+local PREVIOUS_MAX_AGE = 2 * 86400 -- the previous full scan only counts when this recent
 local GETALL_COOLDOWN = 15 * 60
 
 local db
@@ -135,8 +145,9 @@ StaticPopupDialogs["AUCTIONHOUSESYNC_RELOAD"] = {
 -- ---------------------------------------------------------------------------
 
 -- Reads every auction of the last full scan (the result stays available until the next one or search).
--- done(list, total) with list[i] = {itemID, count, buyout, seller or nil, timeLeft, bid}, or done(nil)
--- when the auction house closed or the list changed meanwhile.
+-- done(list, total) with list[i] = {itemID, count, buyout, seller or nil, timeLeft, bid}, or
+-- done(nil, reason) when the auction house closed, the list changed meanwhile, or too few auctions
+-- could be read.
 local function ReadAuctions(done, progress)
 	local total = NumAuctions()
 	if not ahOpen or total == 0 then return done(nil) end
@@ -153,6 +164,13 @@ local function ReadAuctions(done, progress)
 			if not owner and not hasAll and C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, itemID) end
 		end
 	end
+	local function unloaded()
+		local n = 0
+		for i = 1, total do
+			if not list[i] then n = n + 1 end
+		end
+		return n
+	end
 	local function missing()
 		local n = 0
 		for i = 1, total do
@@ -160,8 +178,16 @@ local function ReadAuctions(done, progress)
 		end
 		return n
 	end
+	local function finish()
+		local read = total - unloaded()
+		if read < total * MIN_READ_SHARE then
+			return done(nil, ("only %d of the %d auctions loaded (%d%%), the scan was not saved"):format(
+				read, total, math.floor(read / total * 100)))
+		end
+		done(list, total)
+	end
 	local function retry(left)
-		if left == 0 or missing() == 0 then return done(list, total) end
+		if left == 0 or missing() == 0 then return finish() end
 		if progress then progress(("Names (%d)"):format(missing())) end
 		C_Timer.After(NAME_RETRY_DELAY, function()
 			if changed() then return done(nil) end
@@ -169,6 +195,19 @@ local function ReadAuctions(done, progress)
 				if not list[i] or not list[i][4] then read(i) end
 			end
 			retry(left - 1)
+		end)
+	end
+	-- the client fills the list in over several seconds: wait until every auction has its item
+	local function waitItems(left)
+		local n = unloaded()
+		if n == 0 or left == 0 then return retry(NAME_RETRIES) end
+		if progress then progress(("Loading %d%%"):format(math.floor((total - n) / total * 100))) end
+		C_Timer.After(ITEM_RETRY_DELAY, function()
+			if changed() then return done(nil) end
+			for i = 1, total do
+				if not list[i] then read(i) end
+			end
+			waitItems(left - 1)
 		end)
 	end
 	local first = 1
@@ -183,12 +222,23 @@ local function ReadAuctions(done, progress)
 		if progress then progress(("Reading %d%%"):format(math.min(100, math.floor((first - 1) / total * 100)))) end
 		if first > total then
 			ticker:Cancel()
-			retry(NAME_RETRIES)
+			waitItems(ITEM_RETRIES)
 		end
 	end)
 end
 
--- Builds and stores a full scan from a read auction list. Returns the scan and the per item prices.
+-- The latest full scan with an auction count, of this realm and faction, made recently
+local function PreviousFullScan(realm, faction)
+	for i = #db.scans, 1, -1 do
+		local s = db.scans[i]
+		if s.full and s.na and s.realm == realm and s.faction == faction and time() - s.t < PREVIOUS_MAX_AGE then
+			return s
+		end
+	end
+end
+
+-- Builds and stores a full scan from a read auction list. Returns the scan and the per item prices,
+-- or nil and the reason when it is far smaller than the previous full scan.
 local function RecordAuctions(list, total, src)
 	local byItem, owners, ownerIndex, parts, named = {}, {}, {}, {}, 0
 	for i = 1, total do
@@ -213,10 +263,17 @@ local function RecordAuctions(list, total, src)
 			parts[#parts + 1] = id .. ":" .. count .. ":" .. buyout .. ":" .. o .. ":" .. timeLeft .. ":" .. bid
 		end
 	end
+	local realm, faction = RealmKey(), UnitFactionGroup("player")
+	local previous = PreviousFullScan(realm, faction)
+	if previous and #parts < previous.na * MIN_SIZE_SHARE then
+		return nil, ("only %d auctions, against %d in the previous full scan (%s): the scan was not saved"):format(
+			#parts, previous.na, date("%H:%M", previous.t))
+	end
 	local data, n = Summarize(byItem)
 	local scan = {
-		t = time(), realm = RealmKey(), faction = UnitFactionGroup("player"), full = true, n = n, data = data,
+		t = time(), realm = realm, faction = faction, full = true, n = n, data = data,
 		auc = table.concat(parts, ","), owners = table.concat(owners, ","), na = #parts, src = src,
+		total = total, -- auctions the server listed (na is those read)
 		ah = MODERN and "modern" or "classic", -- the time left bands differ
 	}
 	table.insert(db.scans, scan)
@@ -463,8 +520,14 @@ local function FinishScan(list, total)
 	Unmute()
 	scanning, reading = false, false
 	if list then
-		local _, byItem = RecordAuctions(list, total, "own")
-		FeedAuctionator(byItem)
+		local scan, byItem = RecordAuctions(list, total, "own")
+		if scan then
+			FeedAuctionator(byItem)
+		else
+			Print(byItem .. ". Auctionator's prices were left as they were. Try again in 15 minutes.")
+		end
+	elseif type(total) == "string" then
+		Print(total .. ". Auctionator's prices were left as they were. Try again in 15 minutes.")
 	else
 		Print("scan interrupted: the auction house was closed or a new search was made. The next full scan is allowed 15 minutes after the last one.")
 	end
@@ -581,6 +644,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local function OnProcessScan(_, itemIndexes)
+	C_Timer.After(1, QueueSellPrices) -- items new to Auctionator
 	if feeding or scanning or type(itemIndexes) ~= "table" then return end
 	local data, count = Summarize(itemIndexes)
 	if count == 0 then return end
@@ -595,12 +659,14 @@ local function OnProcessScan(_, itemIndexes)
 	db.lastGetAll = state and (MODERN and state.TimeOfLastReplicateScan or state.TimeOfLastGetAllScan) or time()
 	ReadAuctions(function(list, total)
 		if list then
-			RecordAuctions(list, total, "auctionator")
+			local scan, reason = RecordAuctions(list, total, "auctionator")
+			if not scan then Print(reason) end
 		else
 			scan.full = true
 			table.insert(db.scans, scan)
 			Prune()
-			Print(("full scan saved: %d items (without the auction list, the auction house was closed too soon)"):format(count))
+			Print(("full scan saved: %d items, without the auction list (%s)"):format(count,
+				type(total) == "string" and total or "the auction house was closed too soon"))
 		end
 	end)
 end
@@ -614,6 +680,52 @@ local function HookDatabase()
 end
 
 -- ---------------------------------------------------------------------------
+-- Vendor sell prices, straight from the game (GetItemInfo), for every item Auctionator has prices for
+-- ---------------------------------------------------------------------------
+
+local SELL_STEP = 100 -- items looked up per frame
+local GetInfo = C_Item and C_Item.GetItemInfo or GetItemInfo
+local sellQueue, sellQueued, sellTicker = {}, {}, nil
+
+-- Stores the item's sell price when the client has the item loaded; true when it is stored.
+local function NoteSellPrice(itemID)
+	local name, _, _, _, _, _, _, _, _, _, price = GetInfo(itemID)
+	if not name then return false end
+	db.sell[itemID] = price or 0
+	return true
+end
+
+local function WorkSellQueue()
+	for _ = 1, SELL_STEP do
+		local id = table.remove(sellQueue)
+		if not id then
+			sellTicker:Cancel()
+			sellTicker = nil
+			return
+		end
+		-- not loaded yet: ask for it; GET_ITEM_INFO_RECEIVED stores it when it arrives
+		if not NoteSellPrice(id) and C_Item and C_Item.RequestLoadItemDataByID then
+			pcall(C_Item.RequestLoadItemDataByID, id)
+		end
+	end
+end
+
+-- Queues every item in Auctionator's price database not looked up yet this session (so a changed
+-- price is picked up on the next login)
+local function QueueSellPrices()
+	local database = Auctionator and Auctionator.Database
+	if not (database and type(database.db) == "table") then return end
+	for key in pairs(database.db) do
+		local id = tonumber(key)
+		if id and not sellQueued[id] then
+			sellQueued[id] = true
+			sellQueue[#sellQueue + 1] = id
+		end
+	end
+	if #sellQueue > 0 and not sellTicker then sellTicker = C_Timer.NewTicker(0, WorkSellQueue) end
+end
+
+-- ---------------------------------------------------------------------------
 -- Events and slash command
 -- ---------------------------------------------------------------------------
 
@@ -622,8 +734,11 @@ frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("AUCTION_HOUSE_SHOW")
 frame:RegisterEvent("AUCTION_HOUSE_CLOSED")
+frame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 frame:SetScript("OnEvent", function(_, event, name)
-	if event == "AUCTION_HOUSE_SHOW" then
+	if event == "GET_ITEM_INFO_RECEIVED" then
+		if sellQueued[name] then NoteSellPrice(name) end
+	elseif event == "AUCTION_HOUSE_SHOW" then
 		ahOpen = true
 		CreateButton()
 		UpdateButton()
@@ -639,6 +754,7 @@ frame:SetScript("OnEvent", function(_, event, name)
 		AuctionhouseSyncDB = AuctionhouseSyncDB or {}
 		db = AuctionhouseSyncDB
 		db.scans = db.scans or {}
+		db.sell = db.sell or {} -- itemID -> vendor sell price in copper
 		if db.popup == nil then db.popup = true end
 		-- Auctionator (re)creates its database in InitializeDatabase: hook every instance it makes
 		if Auctionator and Auctionator.Variables and Auctionator.Variables.InitializeDatabase then
@@ -647,6 +763,7 @@ frame:SetScript("OnEvent", function(_, event, name)
 		HookDatabase()
 	elseif event == "PLAYER_LOGIN" then
 		HookDatabase()
+		C_Timer.After(10, QueueSellPrices) -- Auctionator loads its price database just after login
 	end
 end)
 
